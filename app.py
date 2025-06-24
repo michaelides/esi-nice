@@ -38,13 +38,6 @@ load_dotenv()
 AGENT_INSTANCE_KEY = "esi_orchestrator_agent_instance"
 STORAGE_SECRET = os.environ.get("STORAGE_SECRET",)
 
-# Configure NiceGUI storage
-app.storage.configure(
-    user_dir=os.path.join(PROJECT_ROOT, os.path.dirname(HF_USER_MEMORIES_DATASET_ID)),
-    general_file=os.path.join(PROJECT_ROOT, '.nicegui', 'storage-general.json'),
-    secret=STORAGE_SECRET,
-)
-
 # Configure NiceGUI static files
 app.add_static_files('/ragdb', os.path.join(PROJECT_ROOT, 'ragdb'))
 app.add_static_files('/workspace_ui_accessible', os.path.join(PROJECT_ROOT, 'workspace_ui_accessible'))
@@ -693,10 +686,17 @@ if __name__ in {"__main__", "__mp_main__"}:
     os.makedirs(workspace_dir, exist_ok=True)
     app.add_static_files('/workspace', workspace_dir)
 
+    # Configure NiceGUI storage here, before ui.run()
+    app.storage.configure(
+        user_dir=os.path.join(PROJECT_ROOT, os.path.dirname(HF_USER_MEMORIES_DATASET_ID)),
+        general_file=os.path.join(PROJECT_ROOT, '.nicegui', 'storage-general.json'),
+        secret=STORAGE_SECRET,
+    )
+
     ui.run(
         title="ESI - NiceGUI",
         host="0.0.0.0",
         port=8080,
         reload=True,
-        storage_secret=STORAGE_SECRET,
+        storage_secret=STORAGE_SECRET, # storage_secret can also be passed here for convenience
     )

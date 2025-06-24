@@ -337,7 +337,7 @@ if __name__ == "__main__":
     os.makedirs(TEST_USER_STORAGE_DIR, exist_ok=True)
     os.makedirs(os.path.dirname(TEST_GENERAL_STORAGE_FILE), exist_ok=True)
 
-    # Configure storage for the standalone test mode
+    # Configure storage for the standalone test mode here, before ui.run()
     app.storage.configure(
         user_dir=TEST_USER_STORAGE_DIR,
         general_file=TEST_GENERAL_STORAGE_FILE,
