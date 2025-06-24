@@ -68,9 +68,8 @@ def setup_global_llm_settings_cached() -> tuple[bool, str | None]:
         print(error_message)
         return False, error_message
 
-@functools.lru_cache(maxsize=1)
-def setup_agent_cached(client: Client, max_search_results: int) -> tuple[Any | None, str | None]:
-    print(f"Initializing AI agent with max_search_results={max_search_results}...")
+def setup_agent_for_client(client: Client, max_search_results: int) -> tuple[Any | None, str | None]:
+    print(f"Initializing AI agent with max_search_results={max_search_results} for client {client.id}...")
     try:
         from tools import get_duckduckgo_tool, get_tavily_tool, get_wikipedia_tool, get_semantic_scholar_tool_for_agent, get_web_scraper_tool_for_agent, get_rag_tool_for_agent, get_coder_tools
 
@@ -129,8 +128,8 @@ def setup_agent_cached(client: Client, max_search_results: int) -> tuple[Any | N
             get_rag_tool_for_agent(),
             get_coder_tools()
         ])
-        client.storage.private[AGENT_INSTANCE_KEY] = agent_instance
-        print("AI agent initialized successfully.")
+        client.shared[AGENT_INSTANCE_KEY] = agent_instance # Changed to client.shared
+        print(f"AI agent initialized successfully for client {client.id}.")
         return agent_instance, None
     except Exception as e:
         error_message = f"Failed to initialize AI agent: {e}"
@@ -170,7 +169,7 @@ def format_llama_chat_history(messages: List[Dict[str, Any]]) -> List[ChatMessag
     return llama_messages
 
 async def get_agent_response_stream(query: str, chat_history: List[ChatMessage]) -> AsyncGenerator[str, None]:
-    agent = ui.current.client.storage.private.get(AGENT_INSTANCE_KEY)
+    agent = ui.current.client.shared.get(AGENT_INSTANCE_KEY) # Changed to client.shared
     if not agent:
         yield "Error: AI agent not initialized. Please refresh the page."
         return
@@ -287,7 +286,7 @@ async def switch_chat_from_ui(chat_id: str):
     if 'suggested_prompts_container_ref' in s:
         await s['suggested_prompts_container_ref'].refresh()
     if 'chat_area_ref' in s:
-        await ui.run_javascript(f'document.getElementById("{s["chat_area_ref"].id}").scrollTop = document.getElementById("{s["chat_area_ref"].id}").scrollHeight;')
+        await ui.run_javascript(f'document.getElementById("{s["chat_area_ref'].id}").scrollTop = document.getElementById("{s["chat_area_ref'].id}").scrollHeight;')
 
 
 def get_discussion_markdown_from_ui(chat_id: str) -> str:
@@ -618,7 +617,12 @@ async def main_page(client: Client):
             ui.label(llm_error).classes('text-body1 text-negative text-center')
         return
 
-    agent_instance, agent_error = setup_agent_cached(client, max_search_results=app.storage.user.get("search_results_count", 5))
+    # Check if agent already exists for this client session
+    agent_instance = client.shared.get(AGENT_INSTANCE_KEY) # Changed to client.shared
+    agent_error = None
+    if not agent_instance:
+        agent_instance, agent_error = setup_agent_for_client(client, max_search_results=app.storage.user.get("search_results_count", 5))
+    
     if not agent_instance:
         with ui.column().classes('absolute-center items-center'):
             ui.icon('error', size='5rem').classes('text-negative')
@@ -687,9 +691,12 @@ if __name__ in {"__main__", "__mp_main__"}:
     app.add_static_files('/workspace', workspace_dir)
 
     # Configure NiceGUI storage here, before ui.run()
-    app.storage.general['user_dir'] = os.path.join(PROJECT_ROOT, os.path.dirname(HF_USER_MEMORIES_DATASET_ID))
-    app.storage.general['general_file'] = os.path.join(PROJECT_ROOT, '.nicegui', 'storage-general.json')
-    app.storage.general['secret'] = STORAGE_SECRET
+    app.storage.configure(
+        user_dir=os.path.join(PROJECT_ROOT, os.path.dirname(HF_USER_MEMORIES_DATASET_ID)),
+        general_file=os.path.join(PROJECT_ROOT, '.nicegui', 'storage-general.json'),
+        secret=STORAGE_SECRET,
+    )
+
     ui.run(
         title="ESI - NiceGUI",
         host="0.0.0.0",
