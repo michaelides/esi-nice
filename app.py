@@ -159,106 +159,10 @@ def _get_ltm_pref_from_cookie() -> bool:
 def _set_ltm_pref_cookie(enabled: bool):
     app.storage.client["long_term_memory_pref"] = str(enabled)
 
-def _load_user_data_from_hf(user_id: str) -> Dict[str, Any]:
-    if not fs or not HF_TOKEN:
-        print("Hugging Face persistence is not enabled or token is missing.")
-        return {}
-
-    user_data = {"chat_metadata": {}, "messages": {}, "uploaded_documents": {}, "uploaded_dataframes": {}}
-    base_path = f"datasets/{HF_USER_MEMORIES_DATASET_ID}/data/{user_id}"
-
-    try:
-        # Load chat metadata
-        metadata_path = f"{base_path}/chat_metadata.json"
-        if fs.exists(metadata_path):
-            with fs.open(metadata_path, "rb") as f:
-                user_data["chat_metadata"] = json.load(f)
-            print(f"Loaded chat metadata for user {user_id}")
-
-        # Load chat messages for each chat_id
-        # Iterate over keys from metadata to ensure we only load existing chats
-        for chat_id in user_data["chat_metadata"].keys():
-            messages_path = f"{base_path}/chats/{chat_id}/messages.json"
-            if fs.exists(messages_path):
-                with fs.open(messages_path, "rb") as f:
-                    user_data["messages"][chat_id] = json.load(f)
-                print(f"Loaded messages for chat {chat_id} for user {user_id}")
-            else:
-                user_data["messages"][chat_id] = [] # Ensure an empty list if file is missing
-
-        # Load uploaded documents
-        docs_dir = f"{base_path}/uploaded_documents"
-        if fs.exists(docs_dir) and fs.isdir(docs_dir):
-            for file_info in fs.ls(docs_dir, detail=True):
-                if file_info['type'] == 'file':
-                    filename = os.path.basename(file_info['name'])
-                    with fs.open(file_info['name'], "rb") as f:
-                        user_data["uploaded_documents"][filename] = f.read()
-            print(f"Loaded {len(user_data['uploaded_documents'])} uploaded documents for user {user_id}")
-
-        # Load uploaded dataframes
-        dfs_dir = f"{base_path}/uploaded_dataframes"
-        if fs.exists(dfs_dir) and fs.isdir(dfs_dir):
-            for file_info in fs.ls(dfs_dir, detail=True):
-                if file_info['type'] == 'file':
-                    filename = os.path.basename(file_info['name'])
-                    with fs.open(file_info['name'], "rb") as f:
-                        user_data["uploaded_dataframes"][filename] = f.read()
-            print(f"Loaded {len(user_data['uploaded_dataframes'])} uploaded dataframes for user {user_id}")
-
-    except Exception as e:
-        print(f"Error loading user data from HF for {user_id}: {e}")
-        # Return empty data if loading fails to prevent app crash
-        return {"chat_metadata": {}, "messages": {}, "uploaded_documents": {}, "uploaded_dataframes": {}}
-    return user_data
-
-def _save_to_hf(user_id: str, data_type: str, data: Any, chat_id: Optional[str] = None):
-    if not fs or not HF_TOKEN:
-        # print("Hugging Face persistence is not enabled or token is missing. Data not saved.")
-        return
-
-    base_path = f"datasets/{HF_USER_MEMORIES_DATASET_ID}/data/{user_id}"
-    
-    try:
-        if data_type == "chat_metadata":
-            path = f"{base_path}/chat_metadata.json"
-            fs.makedirs(os.path.dirname(path), exist_ok=True)
-            with fs.open(path, "wb") as f:
-                f.write(json.dumps(data, indent=2).encode('utf-8'))
-            print(f"{data_type} for {user_id} saved to HF.")
-        elif data_type == "messages":
-            if not chat_id: raise ValueError("chat_id must be provided for messages save.")
-            path = f"{base_path}/chats/{chat_id}/messages.json"
-            fs.makedirs(os.path.dirname(path), exist_ok=True)
-            with fs.open(path, "wb") as f:
-                f.write(json.dumps(data, indent=2).encode('utf-8'))
-            print(f"{data_type} for {chat_id} saved to HF.")
-        elif data_type == "uploaded_documents":
-            docs_path = f"{base_path}/uploaded_documents"
-            fs.makedirs(docs_path, exist_ok=True)
-            for filename, content in data.items():
-                file_path = f"{docs_path}/{filename}"
-                with fs.open(file_path, "wb") as f:
-                    f.write(content)
-            print(f"{len(data)} uploaded documents saved to HF.")
-        elif data_type == "uploaded_dataframes":
-            dfs_path = f"{base_path}/uploaded_dataframes"
-            fs.makedirs(dfs_path, exist_ok=True)
-            for filename, content in data.items():
-                file_path = f"{dfs_path}/{filename}"
-                with fs.open(file_path, "wb") as f:
-                    f.write(content)
-            print(f"{len(data)} uploaded dataframes saved to HF.")
-        else:
-            print(f"Unknown data type for saving: {data_type}")
-    except Exception as e:
-        print(f"Error saving {data_type} to HF for {user_id} (chat_id: {chat_id}): {e}")
-
-def save_chat_history_to_hf(user_id: str, chat_id: str, messages: List[Dict[str, Any]]):
-    _save_to_hf(user_id, "messages", messages, chat_id=chat_id)
-
-def save_chat_metadata_to_hf(user_id: str, chat_metadata: Dict[str, str]):
-    _save_to_hf(user_id, "chat_metadata", chat_metadata)
+# Removed _load_user_data_from_hf function
+# Removed _save_to_hf function
+# Removed save_chat_history_to_hf function
+# Removed save_chat_metadata_to_hf function
 
 def format_llama_chat_history(messages: List[Dict[str, Any]]) -> List[ChatMessage]:
     """Formats chat history from UI format to LlamaIndex ChatMessage format."""
@@ -421,33 +325,48 @@ def get_discussion_docx_from_ui(chat_id: str) -> bytes:
     return buffer.getvalue()
 
 async def forget_me_from_ui():
-    user_id = _get_user_id_from_cookie()
-    if user_id and fs and HF_TOKEN:
-        base_path = f"datasets/{HF_USER_MEMORIES_DATASET_ID}/data/{user_id}"
-        try:
-            if fs.exists(base_path):
-                fs.rm(base_path, recursive=True)
-                print(f"Deleted all data for user {user_id} from HF.")
-        except Exception as e:
-            print(f"Error deleting user data from HF for {user_id}: {e}")
-    
+    # The user_id from cookie and HF deletion are no longer the primary mechanism.
+    # NiceGUI's app.storage.user is automatically user-specific.
+    # Clearing it and reloading achieves the "forget me" effect.
+
+    # Optional: If there was an old user_id in a cookie, delete it.
     _delete_user_id_cookie()
-    app.storage.user.clear() # Clear all user session data
+    # Also delete the LTM preference cookie for a full reset.
+    if "long_term_memory_pref" in app.storage.client:
+        del app.storage.client["long_term_memory_pref"]
     
-    ui.notify("All data deleted. Refreshing...", type='warning')
-    # Force a full page reload to re-initialize everything from scratch
+    # Clear all data associated with the current user in NiceGUI's persistent storage.
+    app.storage.user.clear()
+    print(f"Cleared app.storage.user for user ID: {app.storage.user.id}") # Log NiceGUI's internal user ID
+
+    # Note: Manually deleting the specific user's .json file from the filesystem
+    # (e.g., .nicegui/storage-user-....json) is an option for more permanent deletion if required,
+    # but app.storage.user.clear() handles the functional aspect of data removal for subsequent sessions.
+    # For this implementation, we rely on clear() and the app not re-populating from elsewhere.
+
+    ui.notify("All your data for this application has been cleared. Refreshing...", type='warning')
+    # Force a full page reload to re-initialize everything from scratch for this user.
     await ui.run_javascript("setTimeout(() => window.location.reload(), 1500);")
 
 
 async def set_long_term_memory_from_ui(enabled: bool):
     s = app.storage.user
-    s["long_term_memory_enabled"] = enabled
-    _set_ltm_pref_cookie(enabled)
+    s["long_term_memory_enabled"] = enabled # Update the value in app.storage.user first
+
+    # Explicitly update the client-side cookie to match the new preference.
+    # This ensures that if initialize_user_session_storage with force_reload=True
+    # uses _get_ltm_pref_from_cookie (which it does for new/cleared sessions),
+    # it will pick up the *newly set* preference.
+    app.storage.client["long_term_memory_pref"] = str(enabled)
+
     ui.notify(f"Long-term memory {'en' if enabled else 'dis'}abled.", type='info')
     
-    # Re-initialize user session storage to apply LTM change (load/clear data)
+    # Re-initialize user session storage to apply LTM change (e.g., chat naming conventions)
     await initialize_user_session_storage(force_reload=True)
     
+    # After force_reload, s["long_term_memory_enabled"] will be correctly set
+    # because _get_ltm_pref_from_cookie will read the updated cookie value.
+
     # Refresh the main UI content to reflect changes in chat list/messages
     ui.find_by_id("chat-list-container").refresh()
     ui.find_by_id("chat-messages-container").refresh()
@@ -543,8 +462,12 @@ async def handle_file_upload_app_impl(e: UploadEventArguments):
 
     if pname:
         msg = f"Received {ptype}: `{pname}`. You can ask to `read_uploaded_{ptype}('{pname}')` or `analyze_uploaded_{ptype}('{pname}')`."
+        # Ensure the message list for the current chat exists
+        if s["current_chat_id"] not in s["messages"]:
+            s["messages"][s["current_chat_id"]] = [] # Initialize as list
         s["messages"][s["current_chat_id"]].append({"role": "assistant", "content": msg})
-        save_chat_history_to_hf(s["user_id"], s["current_chat_id"], s["messages"][s["current_chat_id"]])
+        # Removed: save_chat_history_to_hf(s["user_id"], s["current_chat_id"], s["messages"][s["current_chat_id"]])
+        # NiceGUI will auto-persist changes to s["messages"]
     
     ui.find_by_id("chat-messages-container").refresh()
     ui.find_by_id("uploaded-files-container").refresh()
@@ -607,38 +530,74 @@ async def initialize_user_session_storage(force_reload: bool = False):
     Initializes or loads user session data into app.storage.user.
     This runs once per client connection.
     """
-    s = app.storage.user
-    user_id = _get_user_id_from_cookie()
+    s = app.storage.user # app.storage.user is already persistent and loaded by NiceGUI
 
-    # If no user_id or force_reload, create a new session
-    if not user_id or force_reload:
-        user_id = str(uuid.uuid4())
-        _set_user_id_cookie(user_id)
-        s["user_id"] = user_id
-        s["chat_metadata"] = ObservableDict()
-        s["messages"] = ObservableDict() # This is the key change: a dict of chat_id -> messages
-        s["current_chat_id"] = None
-        s["uploaded_documents"] = ObservableDict()
-        s["uploaded_dataframes"] = ObservableDict()
+    # Determine if this is effectively a new user session from the perspective of our application's data model
+    # This happens if force_reload is true, or if our application-specific 'user_id' isn't in app.storage.user yet.
+    is_new_app_session = force_reload or not s.get("user_id")
+
+    if force_reload:
+        s.clear() # Wipe slate clean if forcing reload
+
+    if is_new_app_session:
+        # Initialize for a new user session or a session that was force_reloaded
+
+        # User ID management:
+        # Try to get user_id from cookie (if it was set by an older version or previous non-reloaded session).
+        # If not in cookie, or if we are force_reloading (in which case cookie shouldn't dictate a link to old data),
+        # generate a fresh one.
+        # This app-specific user_id is then stored in app.storage.user.
+        user_id_from_cookie = _get_user_id_from_cookie()
+        if user_id_from_cookie and not force_reload:
+            s["user_id"] = user_id_from_cookie
+        else:
+            s["user_id"] = str(uuid.uuid4())
+        # Update the cookie as well. While app.storage.user is primary, cookie might be useful for other contexts or debugging.
+        _set_user_id_cookie(s["user_id"])
+
+        # Initialize data structures
+        s.setdefault("chat_metadata", ObservableDict())
+        s.setdefault("messages", ObservableDict())
+        s.setdefault("current_chat_id", None)
+        s.setdefault("uploaded_documents", ObservableDict())
+        s.setdefault("uploaded_dataframes", ObservableDict())
+
+        # LTM Preference for new/reloaded session:
+        # Set from cookie (if available, for transition) or use default from _get_ltm_pref_from_cookie().
+        # This value is immediately persisted in app.storage.user.
         s["long_term_memory_enabled"] = _get_ltm_pref_from_cookie()
-        print(f"New user session initialized with ID: {user_id}")
+
+        print(f"User session initialized/reloaded. App User ID: {s['user_id']}. LTM enabled: {s['long_term_memory_enabled']}")
         await initialize_active_chat_session(new_chat=True)
-    elif not s.get("user_id") or s["user_id"] != user_id:
-        # Load existing user data if not already loaded or if user_id changed
-        s["user_id"] = user_id
-        user_data = _load_user_data_from_hf(user_id)
-        s["chat_metadata"] = ObservableDict(user_data.get("chat_metadata", {}))
-        # Convert loaded messages to ObservableDicts for reactivity
-        s["messages"] = ObservableDict({
-            chat_id: ObservableDict(msgs) for chat_id, msgs in user_data.get("messages", {}).items()
-        })
-        s["uploaded_documents"] = ObservableDict(user_data.get("uploaded_documents", {}))
-        s["uploaded_dataframes"] = ObservableDict(user_data.get("uploaded_dataframes", {}))
-        s["long_term_memory_enabled"] = _get_ltm_pref_from_cookie()
-        print(f"Loaded existing user session for ID: {user_id}")
+    else:
+        # Existing user session: app.storage.user was populated by NiceGUI.
+        # Our app_user_id (s["user_id"]) is already present.
+
+        # Ensure data structures are the correct observable types (safeguard).
+        if not isinstance(s.get("chat_metadata"), ObservableDict):
+            s["chat_metadata"] = ObservableDict(s.get("chat_metadata", {}))
+        if not isinstance(s.get("messages"), ObservableDict):
+            s["messages"] = ObservableDict(s.get("messages", {}))
+            # Ensure inner message lists are standard lists.
+            for chat_id_key in list(s["messages"].keys()):
+                if chat_id_key in s["messages"] and not isinstance(s["messages"][chat_id_key], list):
+                     s["messages"][chat_id_key] = list(s["messages"].get(chat_id_key, []))
+        if not isinstance(s.get("uploaded_documents"), ObservableDict):
+            s["uploaded_documents"] = ObservableDict(s.get("uploaded_documents", {}))
+        if not isinstance(s.get("uploaded_dataframes"), ObservableDict):
+            s["uploaded_dataframes"] = ObservableDict(s.get("uploaded_dataframes", {}))
+
+        # LTM Preference for existing user:
+        # If "long_term_memory_enabled" is not yet in app.storage.user (e.g. older session data),
+        # initialize it from cookie (for transition) or default.
+        # Otherwise, the value already in app.storage.user is used.
+        if "long_term_memory_enabled" not in s:
+            s["long_term_memory_enabled"] = _get_ltm_pref_from_cookie()
         
-        # Set current chat or create a new one if none exist
-        if not s["chat_metadata"]:
+        print(f"Existing user session loaded. App User ID: {s['user_id']}. LTM enabled: {s['long_term_memory_enabled']}")
+
+        # Set current chat or create a new one if none exist or current is invalid
+        if not s.get("chat_metadata") or not s.get("current_chat_id") or s.get("current_chat_id") not in s.get("chat_metadata"):
             await initialize_active_chat_session(new_chat=True)
         else:
             if not s.get("current_chat_id") or s["current_chat_id"] not in s["chat_metadata"]:
@@ -761,22 +720,29 @@ async def main_page(client: Client):
 
 if __name__ in {"__main__", "__mp_main__"}:
     # Ensure the workspace directory exists
-    os.makedirs(os.path.join(PROJECT_ROOT, "code_interpreter_ws"), exist_ok=True)
+    workspace_dir = os.path.join(PROJECT_ROOT, "code_interpreter_ws")
+    os.makedirs(workspace_dir, exist_ok=True)
     # Add static files for the workspace so the code interpreter can access them via URL
-    app.add_static_files('/workspace', os.path.join(PROJECT_ROOT, "code_interpreter_ws"))
+    app.add_static_files('/workspace', workspace_dir)
+
+    # Ensure the NiceGUI storage path exists
+    storage_path_dir = os.path.join(PROJECT_ROOT, "huggingface/user_memories")
+    os.makedirs(storage_path_dir, exist_ok=True)
+    print(f"NiceGUI user data will be stored in: {storage_path_dir}")
 
     # Check for API keys
     if not os.getenv("GOOGLE_API_KEY") and not os.getenv("OPENAI_API_KEY"):
         print("⚠️ Neither GOOGLE_API_KEY nor OPENAI_API_KEY is set. LLM functionality may be limited.")
     if not os.getenv("TAVILY_API_KEY"):
         print("⚠️ TAVILY_API_KEY not set. Search functionality may be limited.")
-    if not os.getenv("HF_TOKEN"):
-        print("⚠️ HF_TOKEN not set. Hugging Face persistence (long-term memory) will be disabled.")
+    if not os.getenv("HF_TOKEN"): # This is still relevant for RAG, not user memories now
+        print("⚠️ HF_TOKEN not set. Hugging Face RAG functionality might be affected.")
 
     ui.run(
         title="ESI - NiceGUI",
         host="0.0.0.0",
         port=8080,
         reload=True, # Set to False for production
-        storage_secret="a_very_secret_key_for_storage_12345" # IMPORTANT: Change this to a strong, unique secret for production!
+        storage_secret="a_very_secret_key_for_storage_12345", # IMPORTANT: Change this to a strong, unique secret for production!
+        storage_path=storage_path_dir
     )
