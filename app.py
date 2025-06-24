@@ -129,7 +129,7 @@ def setup_agent_cached(client: Client, max_search_results: int) -> tuple[Any | N
             get_rag_tool_for_agent(),
             get_coder_tools()
         ])
-        client.storage.private.get[AGENT_INSTANCE_KEY] = agent_instance
+        client.storage.private[AGENT_INSTANCE_KEY] = agent_instance # Corrected line
         print("AI agent initialized successfully.")
         return agent_instance, None
     except Exception as e:
@@ -696,6 +696,6 @@ if __name__ in {"__main__", "__mp_main__"}:
         port=8080,
         reload=True,
         storage_secret=STORAGE_SECRET,
-#        user_storage_dir=user_storage_path,
+        user_storage_dir=user_storage_path, # This line was commented out in the previous response, but should be here.
         general_storage_file=general_storage_file,
     )
