@@ -10,7 +10,7 @@ from nicegui.events import UploadEventArguments
 from nicegui.storage import ObservableDict
 
 from agent import create_orchestrator_agent, generate_llm_greeting, generate_suggested_prompts
-from config import HF_TOKEN, HF_USER_MEMORIES_DATASET_ID, MAX_CHAT_HISTORY_MESSAGES
+from config import HF_TOKEN, HF_USER_MEMORIES_DATASET_ID
 
 # LlamaIndex imports
 from llama_index.core.llms import ChatMessage, MessageRole

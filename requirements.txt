@@ -3,12 +3,6 @@ llama-index-core
 llama-index-llms-gemini # For the LLM
 # llama-index-embeddings-huggingface # REMOVED - Switched to Google
 llama-index-embeddings-google-genai # ADDED - For Google embeddings
-# llama-index-embeddings-gemini # REMOVED - Not currently used in agent.py
-# llama-index-llms-openai # Optional: If OpenAI models might be used - REMOVED
-# openai # Optional: If OpenAI models might be used - REMOVED
-
-# Agent related
-# llama-index-agent-openai # Optional: If using OpenAI function calling agent features - REMOVED
 llama-index-experimental # For experimental features if needed
 
 # Tools
@@ -22,13 +16,8 @@ llama-index-readers-web
 llama-index-readers-semanticscholar
 llama-index-readers-file # Handles various file types via SimpleDirectoryReader
 
-# Vector Store
-llama-index-vector-stores-chroma
-chromadb
-# langchain-community # Removed
 
 # Supporting Libraries
-streamlit
 pypdf # Added for PDF parsing with SimpleDirectoryReader
 python-dotenv
 beautifulsoup4
@@ -43,8 +32,6 @@ duckduckgo-search
 semanticscholar
 trafilatura # For web reader dependency
 huggingface_hub 
-fsspec
-extra_streamlit_components
 # sentence-transformers # REMOVED - Dependency for HF embeddings
 python-docx>=1.1.0 # Added for DOCX generation, specifying compatible version
 lxml>=5.0.0 # Explicitly add lxml and specify compatible version for Python 3.13
