@@ -9,11 +9,12 @@ from PyPDF2 import PdfReader # Keep for type hints if any
 from docx import Document # Keep for type hints if any
 import io # Keep for type hints if any
 import mimetypes # Keep for standalone test
+from dotenv import load_dotenv # Keep for standalone test
 
 PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 UI_ACCESSIBLE_WORKSPACE = os.path.join(PROJECT_ROOT, "workspace_ui_accessible")
 os.makedirs(UI_ACCESSIBLE_WORKSPACE, exist_ok=True)
-
+STORAGE_SECRET = os.environ.get("STORAGE_SECRET",)
 CODE_DOWNLOAD_MARKER = "---DOWNLOAD_FILE---"
 RAG_SOURCE_MARKER = "---RAG_SOURCE---"
 
@@ -422,4 +423,4 @@ if __name__ == "__main__":
 
     app.add_static_files('/workspace', UI_ACCESSIBLE_WORKSPACE)
     mimetypes.add_type('application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.docx')
-    ui.run(title="ESI NiceGUI Test", storage_secret="another_secret_key_for_testing_123", host="0.0.0.0", port=8080)
+    ui.run(title="ESI NiceGUI Test", storage_secret=STORAGE_SECRET, host="0.0.0.0", port=8080)

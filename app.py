@@ -38,6 +38,7 @@ load_dotenv()
 
 PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 AGENT_INSTANCE_KEY = "esi_orchestrator_agent_instance"
+STORAGE_SECRET = os.environ.get("STORAGE_SECRET",)
 
 def simple_once_cache(func):
     _cache = {}
@@ -726,23 +727,16 @@ if __name__ in {"__main__", "__mp_main__"}:
     app.add_static_files('/workspace', workspace_dir)
 
     # Ensure the NiceGUI storage path exists
-    storage_path_dir = os.path.join(PROJECT_ROOT, "huggingface/user_memories")
+    storage_path_dir = os.path.join(PROJECT_ROOT, "gm42/user_memories")
     os.makedirs(storage_path_dir, exist_ok=True)
     print(f"NiceGUI user data will be stored in: {storage_path_dir}")
 
-    # Check for API keys
-    if not os.getenv("GOOGLE_API_KEY") and not os.getenv("OPENAI_API_KEY"):
-        print("⚠️ Neither GOOGLE_API_KEY nor OPENAI_API_KEY is set. LLM functionality may be limited.")
-    if not os.getenv("TAVILY_API_KEY"):
-        print("⚠️ TAVILY_API_KEY not set. Search functionality may be limited.")
-    if not os.getenv("HF_TOKEN"): # This is still relevant for RAG, not user memories now
-        print("⚠️ HF_TOKEN not set. Hugging Face RAG functionality might be affected.")
 
     ui.run(
         title="ESI - NiceGUI",
         host="0.0.0.0",
         port=8080,
         reload=True, # Set to False for production
-        storage_secret="a_very_secret_key_for_storage_12345", # IMPORTANT: Change this to a strong, unique secret for production!
-        storage_path=storage_path_dir
+        storage_secret=STORAGE_SECRET, # IMPORTANT: Change this to a strong, unique secret for production!
+        #storage_path=storage_path_dir
     )
