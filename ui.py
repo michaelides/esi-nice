@@ -337,6 +337,13 @@ if __name__ == "__main__":
     os.makedirs(TEST_USER_STORAGE_DIR, exist_ok=True)
     os.makedirs(os.path.dirname(TEST_GENERAL_STORAGE_FILE), exist_ok=True)
 
+    # Configure storage for the standalone test mode
+    app.storage.configure(
+        user_dir=TEST_USER_STORAGE_DIR,
+        general_file=TEST_GENERAL_STORAGE_FILE,
+        secret=STORAGE_SECRET,
+    )
+
     @ui.page('/')
     async def index_page(client: Client):
         app.storage.user.clear()
@@ -487,6 +494,4 @@ if __name__ == "__main__":
         storage_secret=STORAGE_SECRET,
         host="0.0.0.0",
         port=8080,
-        user_storage_dir=TEST_USER_STORAGE_DIR,
-        general_storage_file=TEST_GENERAL_STORAGE_FILE,
     )

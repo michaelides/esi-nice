@@ -38,6 +38,13 @@ load_dotenv()
 AGENT_INSTANCE_KEY = "esi_orchestrator_agent_instance"
 STORAGE_SECRET = os.environ.get("STORAGE_SECRET",)
 
+# Configure NiceGUI storage
+app.storage.configure(
+    user_dir=os.path.join(PROJECT_ROOT, os.path.dirname(HF_USER_MEMORIES_DATASET_ID)),
+    general_file=os.path.join(PROJECT_ROOT, '.nicegui', 'storage-general.json'),
+    secret=STORAGE_SECRET,
+)
+
 # Configure NiceGUI static files
 app.add_static_files('/ragdb', os.path.join(PROJECT_ROOT, 'ragdb'))
 app.add_static_files('/workspace_ui_accessible', os.path.join(PROJECT_ROOT, 'workspace_ui_accessible'))
@@ -129,7 +136,7 @@ def setup_agent_cached(client: Client, max_search_results: int) -> tuple[Any | N
             get_rag_tool_for_agent(),
             get_coder_tools()
         ])
-        client.storage.private[AGENT_INSTANCE_KEY] = agent_instance # Corrected line
+        client.storage.private[AGENT_INSTANCE_KEY] = agent_instance
         print("AI agent initialized successfully.")
         return agent_instance, None
     except Exception as e:
@@ -686,16 +693,10 @@ if __name__ in {"__main__", "__mp_main__"}:
     os.makedirs(workspace_dir, exist_ok=True)
     app.add_static_files('/workspace', workspace_dir)
 
-    # Define storage paths for ui.run
-    user_storage_path = os.path.join(PROJECT_ROOT, os.path.dirname(HF_USER_MEMORIES_DATASET_ID))
-    general_storage_file = os.path.join(PROJECT_ROOT, '.nicegui', 'storage-general.json')
-
     ui.run(
         title="ESI - NiceGUI",
         host="0.0.0.0",
         port=8080,
         reload=True,
         storage_secret=STORAGE_SECRET,
-        user_storage_dir=user_storage_path, # This line was commented out in the previous response, but should be here.
-        general_storage_file=general_storage_file,
     )
