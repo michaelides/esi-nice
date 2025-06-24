@@ -51,3 +51,4 @@ lxml>=5.0.0 # Explicitly add lxml and specify compatible version for Python 3.13
 PyPDF2 # Added for PDF file processing
 pyreadstat # Added for SPSS .sav file processing
 datasets>=2.0.0 # Added for Hugging Face datasets
+nicegui
