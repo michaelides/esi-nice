@@ -687,12 +687,9 @@ if __name__ in {"__main__", "__mp_main__"}:
     app.add_static_files('/workspace', workspace_dir)
 
     # Configure NiceGUI storage here, before ui.run()
-    app.storage.configure(
-        user_dir=os.path.join(PROJECT_ROOT, os.path.dirname(HF_USER_MEMORIES_DATASET_ID)),
-        general_file=os.path.join(PROJECT_ROOT, '.nicegui', 'storage-general.json'),
-        secret=STORAGE_SECRET,
-    )
-
+    app.storage.general['user_dir'] = os.path.join(PROJECT_ROOT, os.path.dirname(HF_USER_MEMORIES_DATASET_ID))
+    app.storage.general['general_file'] = os.path.join(PROJECT_ROOT, '.nicegui', 'storage-general.json')
+    app.storage.general['secret'] = STORAGE_SECRET
     ui.run(
         title="ESI - NiceGUI",
         host="0.0.0.0",
