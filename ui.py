@@ -1,15 +1,16 @@
-from nicegui import ui, app, Client # Added Client here
-from typing import List, Dict, Any, Optional, Callable, Coroutine # Added Coroutine
+from nicegui import ui, app, Client
+from typing import List, Dict, Any, Optional, Callable, Coroutine, Tuple
 import os
 import re
 import json
 import html
-import pandas as pd # Keep for type hints if any, though app.py handles actual pd logic
-from PyPDF2 import PdfReader # Keep for type hints if any
-from docx import Document # Keep for type hints if any
-import io # Keep for type hints if any
-import mimetypes # Keep for standalone test
-from dotenv import load_dotenv # Keep for standalone test
+import pandas as pd
+from PyPDF2 import PdfReader
+from docx import Document
+import io
+import mimetypes
+from dotenv import load_dotenv
+import time # For standalone test sleep
 
 PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 UI_ACCESSIBLE_WORKSPACE = os.path.join(PROJECT_ROOT, "workspace_ui_accessible")
@@ -20,14 +21,14 @@ RAG_SOURCE_MARKER = "---RAG_SOURCE---"
 
 class ChatState:
     def __init__(self):
-        # This chat_state is primarily for UI-bound elements like the input field value.
-        # Most other state (messages, uploaded files, etc.) will be driven by app.storage.user from app.py.
-        self.chat_input_value: Optional[str] = "" # Bound to the input field
-        # Other ui-specific temporary states can be added if needed, but avoid duplicating app.storage.user
+        self.chat_input_value: Optional[str] = ""
 
-chat_state = ChatState() # Local instance for UI bindings
+    def set_chat_input_value(self, value: str):
+        self.chat_input_value = value
 
-class AppCallbacks: # Defines the structure of callbacks app.py will provide
+chat_state = ChatState()
+
+class AppCallbacks:
     def __init__(self):
         self.handle_user_input: Optional[Callable[[str], Coroutine[Any, Any, None]]] = None
         self.reset_chat: Optional[Callable[[], Coroutine[Any, Any, None]]] = None
@@ -43,11 +44,18 @@ class AppCallbacks: # Defines the structure of callbacks app.py will provide
         self.handle_file_upload_app: Optional[Callable[[str, bytes, Optional[str]], Coroutine[Any, Any, None]]] = None
         self.remove_file_app: Optional[Callable[[str, str], Coroutine[Any, Any, None]]] = None
 
-app_callbacks = AppCallbacks() # Global instance to hold registered callbacks
+app_callbacks = AppCallbacks()
 
 async def display_chat_messages(chat_container: ui.column):
-    s = app.storage.user # Source of truth for messages
-    messages_to_display = s.get("messages", [])
+    s = app.storage.user
+    current_chat_id = s.get("current_chat_id")
+    if not current_chat_id:
+        chat_container.clear()
+        with chat_container:
+            ui.label("Start a new chat to begin!").classes('text-italic text-center w-full')
+        return
+
+    messages_to_display = s.get("messages", {}).get(current_chat_id, [])
 
     chat_container.clear()
     with chat_container:
@@ -97,7 +105,7 @@ async def display_chat_messages(chat_container: ui.column):
                             elif path and path.startswith("file://"):
                                 f_ws = os.path.join(UI_ACCESSIBLE_WORKSPACE, os.path.basename(path[len("file://"):]))
                                 if os.path.exists(f_ws):
-                                    dl_url = f"/workspace/{os.path.basename(f_ws)}" # Assumes app.add_static_files in app.py
+                                    dl_url = f"/workspace/{os.path.basename(f_ws)}"
                                     ui.html(f"Src: {cite}<a href='{dl_url}' target='_blank' download='{html.escape(name)}'>DL PDF: {html.escape(name)}</a>"); ditem=True
                                 else: ui.label(f"PDF '{name}' missing.").classes('text-warning')
                     elif stype == "web":
@@ -129,20 +137,18 @@ async def copy_to_clipboard(text_to_copy: str, msg_idx: int):
 async def handle_send_message():
     user_input = chat_state.chat_input_value
     if user_input and app_callbacks.handle_user_input:
-        chat_state.chat_input_value = ""
+        chat_state.set_chat_input_value("")
         await app_callbacks.handle_user_input(user_input)
 
 async def handle_suggested_prompt(prompt: str):
     if app_callbacks.handle_user_input:
         await app_callbacks.handle_user_input(prompt)
 
-async def handle_ui_file_upload(e: Any): # NiceGUI's UploadEventArguments
+async def handle_ui_file_upload(e: Any):
     if app_callbacks.handle_file_upload_app:
-        file_content = e.content.read() if hasattr(e.content, 'read') else e.content # Handle BytesIO or bytes
+        file_content = e.content.read() if hasattr(e.content, 'read') else e.content
         await app_callbacks.handle_file_upload_app(e.name, file_content, e.type)
     else: ui.notify("File upload processing not configured.", type='negative')
-
-# Note: handle_ui_remove_file is not needed here if app.py's list builder directly calls app_callbacks.remove_file_app
 
 def create_nicegui_interface(
     ext_handle_user_input_callback: Callable[[str], Coroutine[Any, Any, None]],
@@ -158,17 +164,14 @@ def create_nicegui_interface(
     ext_regenerate_callback: Callable[[], Coroutine[Any, Any, None]],
     ext_handle_file_upload_app_callback: Callable[[str, bytes, Optional[str]], Coroutine[Any, Any, None]],
     ext_remove_file_app_callback: Callable[[str, str], Coroutine[Any, Any, None]],
-    # State values from app.py for initial setup / read-only display parts
-    current_chat_id_val: Optional[str], # Read from app.storage.user by UI logic
-    chat_metadata_val: Dict[str, str],   # Read from app.storage.user by UI logic
-    # messages_val is not needed here as display_chat_messages reads from app.storage.user
-    # uploaded_docs_val & uploaded_dfs_val not needed here if app.py builds the list
+    current_chat_id_val: Optional[str],
+    chat_metadata_val: Dict[str, str],
     llm_temp_val: float,
     llm_verb_val: int,
     search_count_val: int,
     ltm_enabled_val: bool,
     suggested_prompts_list_val: Optional[List[str]]
-):
+) -> Tuple[ui.column, ui.refreshable, ui.refreshable, ui.refreshable]: # Return refreshable functions
     global app_callbacks
     app_callbacks.handle_user_input = ext_handle_user_input_callback
     app_callbacks.reset_chat = ext_reset_callback
@@ -184,48 +187,66 @@ def create_nicegui_interface(
     app_callbacks.handle_file_upload_app = ext_handle_file_upload_app_callback
     app_callbacks.remove_file_app = ext_remove_file_app_callback
 
-    # Bind local chat_state for UI input to app.storage.user for central management
-    # This assumes app.py will initialize these in app.storage.user for binding
-    chat_state.llm_temperature = llm_temp_val # Initial value
-    chat_state.llm_verbosity = llm_verb_val
-    chat_state.search_results_count = search_count_val
-    # ltm_enabled_val is used for conditional UI, actual state in app.storage.user
-
     with ui.header(elevated=True).classes('bg-primary text-white'):
         ui.label("🎓 ESI: ESI Scholarly Instructor").classes('text-h5')
 
     with ui.left_drawer(value=True, bordered=True).props('width=300'):
         ui.label("Chat Controls & Settings").classes("text-h6 q-pa-md")
-        with ui.expansion("Chat History", icon="forum").props('group="sidebar" expanded'):
-            s_user = app.storage.user # Access user-specific storage
-            if not s_user.get("long_term_memory_enabled", False):
-                ui.label("LTM disabled. Chats are temporary.").classes("q-pa-sm text-warning")
-                ui.button("➕ New Chat (Temp)", on_click=app_callbacks.new_chat).props('flat color=primary icon=add').classes('w-full')
-            else:
-                ui.button("➕ New Chat", on_click=app_callbacks.new_chat).props('flat color=primary icon=add').classes('w-full')
-
+        
+        @ui.refreshable
+        def chat_list_container_ui():
+            s_user = app.storage.user
             current_meta = s_user.get("chat_metadata", {})
             curr_chat_id = s_user.get("current_chat_id")
-            if current_meta:
-                for chat_id, chat_name in sorted(current_meta.items(), key=lambda item: item[1].lower()):
-                    with ui.row().classes('w-full items-center no-wrap'):
-                        is_c = (chat_id == curr_chat_id)
-                        btn_props = f'flat color="{"primary" if is_c else "grey-7"}" {"" if is_c else "text-color=dark"}'
-                        ui.button(chat_name, on_click=lambda cid=chat_id: app_callbacks.switch_chat(cid) if not is_c else None).props(btn_props).classes('flex-grow text-left')
-                        with ui.button(icon='more_vert').props('flat round dense'):
-                            with ui.menu() as menu: # Keep menu reference for handlers
-                                ui.menu_item('Rename', on_click=lambda cid=chat_id, cname=chat_name, m=menu: handle_rename_chat_dialog(cid, cname, m))
-                                ui.menu_item('Download MD', on_click=lambda cid=chat_id, cname=chat_name, m=menu: handle_download_md(cid, cname, m))
-                                ui.menu_item('Download DOCX', on_click=lambda cid=chat_id, cname=chat_name, m=menu: handle_download_docx(cid, cname, m))
-                                ui.menu_item('Delete', on_click=lambda cid=chat_id, m=menu: handle_delete_chat_confirm(cid, m))
-            else: ui.label("No saved chats.").classes('q-pa-sm text-italic')
 
-        with ui.expansion("Upload Files", icon="upload_file").props('group="sidebar"'):
-            ui.upload(label="Upload document or dataset", auto_upload=True, on_upload=handle_ui_file_upload, max_file_size=50*1024*1024).props('accept=".pdf,.docx,.md,.txt,.csv,.xlsx,.sav"')
-            # The container for the list of uploaded files
-            # app.py will create a refreshable function that populates this.
-            uploaded_files_container = ui.column().classes('w-full q-pt-sm')
-            app.storage.user['ui_uploaded_files_container_ref'] = uploaded_files_container # app.py will use this ref
+            with ui.expansion("Chat History", icon="forum").props('group="sidebar" expanded'):
+                if not s_user.get("long_term_memory_enabled", False):
+                    ui.label("LTM disabled. Chats are temporary.").classes("q-pa-sm text-warning")
+                    ui.button("➕ New Chat (Temp)", on_click=app_callbacks.new_chat).props('flat color=primary icon=add').classes('w-full')
+                else:
+                    ui.button("➕ New Chat", on_click=app_callbacks.new_chat).props('flat color=primary icon=add').classes('w-full')
+
+                if current_meta:
+                    for chat_id, chat_name in sorted(current_meta.items(), key=lambda item: item[1].lower()):
+                        with ui.row().classes('w-full items-center no-wrap'):
+                            is_c = (chat_id == curr_chat_id)
+                            btn_props = f'flat color="{"primary" if is_c else "grey-7"}" {"" if is_c else "text-color=dark"}'
+                            ui.button(chat_name, on_click=lambda cid=chat_id: app_callbacks.switch_chat(cid) if not is_c else None).props(btn_props).classes('flex-grow text-left')
+                            with ui.button(icon='more_vert').props('flat round dense'):
+                                with ui.menu() as menu:
+                                    ui.menu_item('Rename', on_click=lambda cid=chat_id, cname=chat_name, m=menu: handle_rename_chat_dialog(cid, cname, m))
+                                    ui.menu_item('Download MD', on_click=lambda cid=chat_id, cname=chat_name, m=menu: handle_download_md(cid, cname, m))
+                                    ui.menu_item('Download DOCX', on_click=lambda cid=chat_id, cname=chat_name, m=menu: handle_download_docx(cid, cname, m))
+                                    ui.menu_item('Delete', on_click=lambda cid=chat_id, m=menu: handle_delete_chat_confirm(cid, m))
+                else: ui.label("No saved chats.").classes('q-pa-sm text-italic')
+        
+        chat_list_container_ui() # Initial call to create the refreshable content
+
+        @ui.refreshable
+        def uploaded_files_list_ui():
+            s_user = app.storage.user
+            uploaded_docs = s_user.get("uploaded_documents", {})
+            uploaded_dfs = s_user.get("uploaded_dataframes", {})
+            
+            with ui.expansion("Upload Files", icon="upload_file").props('group="sidebar"'):
+                ui.upload(label="Upload document or dataset", auto_upload=True, on_upload=handle_ui_file_upload, max_file_size=50*1024*1024).props('accept=".pdf,.docx,.md,.txt,.csv,.xlsx,.sav"')
+                
+                if uploaded_docs or uploaded_dfs:
+                    if uploaded_docs:
+                        ui.label("Documents:").classes("text-caption")
+                        for name_ in uploaded_docs:
+                            with ui.row().classes('w-full items-center'):
+                                ui.icon('description'); ui.label(name_).classes('flex-grow')
+                                ui.button(icon='delete', on_click=lambda n=name_: app_callbacks.remove_file_app("document", n)).props('flat dense round color=negative')
+                    if uploaded_dfs:
+                        ui.label("Dataframes:").classes("text-caption")
+                        for name_ in uploaded_dfs:
+                            with ui.row().classes('w-full items-center'):
+                                ui.icon('table_chart'); ui.label(name_).classes('flex-grow')
+                                ui.button(icon='delete', on_click=lambda n=name_: app_callbacks.remove_file_app("dataframe", n)).props('flat dense round color=negative')
+                else: ui.label("No files uploaded.").classes('q-pa-sm text-italic')
+        
+        uploaded_files_list_ui() # Initial call to create the refreshable content
 
         with ui.expansion("LLM Settings", icon="tune").props('group="sidebar"'):
             ui.slider(min=0.0, max=2.0, step=0.1).bind_value(app.storage.user, 'llm_temperature').props('label="Creativity (Temp.)"')
@@ -233,7 +254,6 @@ def create_nicegui_interface(
             ui.slider(min=3, max=15, step=1).bind_value(app.storage.user, 'search_results_count').props('label="Search Results"')
             ui.switch("Enable Long-term Memory").bind_value(app.storage.user, 'long_term_memory_enabled').on_change(lambda e: app_callbacks.set_long_term_memory(e.value) if app_callbacks.set_long_term_memory else None)
 
-            # Conditional "Forget Me" button display
             with ui.column().bind_visibility_from(app.storage.user, 'long_term_memory_enabled'):
                  with ui.button("Forget Me (Delete All Data)").props('color=negative flat').classes('w-full q-mt-md'):
                     with ui.menu() as menu_f:
@@ -249,16 +269,20 @@ def create_nicegui_interface(
             ui.markdown("ESI uses AI to help you navigate the dissertation process...").classes('q-pa-md')
 
     with ui.column().classes('w-full h-full no-wrap items-stretch'):
-        chat_area = ui.column().classes('w-full flex-grow overflow-y-auto q-pa-md').style('height: calc(100vh - 150px);') # Adjusted height
-        app.storage.user['chat_area_ref'] = chat_area
-
-        suggested_prompts_container = ui.row().classes('w-full q-pa-sm justify-center')
-        # Suggested prompts will be populated by app.py using a refreshable component or direct creation
-        app.storage.user['suggested_prompts_container_ref'] = suggested_prompts_container
-        if suggested_prompts_list_val: # Initial prompts from app.py state
-             with suggested_prompts_container:
-                for p_text in suggested_prompts_list_val:
-                    ui.button(p_text, on_click=lambda p=p_text: handle_suggested_prompt(p)).props('outline rounded dense color=primary').classes('q-ma-xs')
+        chat_area = ui.column().classes('w-full flex-grow overflow-y-auto q-pa-md').style('height: calc(100vh - 150px);')
+        
+        @ui.refreshable
+        def suggested_prompts_container_ui():
+            s_user = app.storage.user
+            suggested_prompts = s_user.get("suggested_prompts", [])
+            with ui.row().classes('w-full q-pa-sm justify-center'):
+                if suggested_prompts:
+                    for p_text in suggested_prompts:
+                        ui.button(p_text, on_click=lambda p=p_text: handle_suggested_prompt(p)).props('outline rounded dense color=primary').classes('q-ma-xs')
+                else:
+                    ui.label("No suggested prompts.").classes('text-italic text-grey-6')
+        
+        suggested_prompts_container_ui() # Initial call to create the refreshable content
 
         with ui.row().classes('w-full items-center q-pa-md bg-grey-2'):
             ui.input(placeholder="Ask me about dissertations...").props('rounded outlined dense input-class="ml-3"').classes('flex-grow').bind_value(chat_state, 'chat_input_value').on('keydown.enter', handle_send_message)
@@ -293,133 +317,161 @@ def create_nicegui_interface(
     async def handle_download_docx(chat_id: str, chat_name: str, parent_menu: ui.menu):
         parent_menu.close()
         if app_callbacks.get_discussion_docx:
-            content = app_callbacks.get_discussion_docx(chat_id)
-            ui.download(content, f"{chat_name.replace(' ', '_')}.docx")
+            try:
+                content = app_callbacks.get_discussion_docx(chat_id)
+                ui.download(content, f"{chat_name.replace(' ', '_')}.docx")
+            except NotImplementedError:
+                ui.notify("DOCX export is not yet implemented.", type='warning')
+            except Exception as e:
+                ui.notify(f"Error downloading DOCX: {e}", type='negative')
         else: ui.notify("DOCX download not set up.", type='negative')
 
-    # Returns key containers for app.py to manage or refresh their content
-    return chat_area, suggested_prompts_container, uploaded_files_container
+    return chat_area, suggested_prompts_container_ui, uploaded_files_list_ui, chat_list_container_ui
 
 
 if __name__ == "__main__":
-    # This standalone test needs careful setup of app.storage.user
-    # and mocking of all callbacks defined in AppCallbacks.
-
     @ui.page('/')
     async def index_page(client: Client):
-        # Initialize app.storage.user for testing
-        # This would normally be handled by app.py's on_connect or similar logic
         app.storage.user.clear()
         app.storage.user.update({
-            "messages": [{"role": "assistant", "content": "ESI NiceGUI Standalone Test"}],
+            "messages": {"test_id_1": [{"role": "assistant", "content": "ESI NiceGUI Standalone Test"}]},
             "chat_metadata": {"test_id_1": "Test Chat Alpha", "test_id_2": "Beta Conversation"},
             "current_chat_id": "test_id_1",
-            "uploaded_documents": {}, # Start empty, will be populated by mock_handle_upload_app
+            "uploaded_documents": {},
             "uploaded_dataframes": {},
             "llm_temperature": 0.6,
             "llm_verbosity": 2,
             "search_results_count": 4,
-            "long_term_memory_enabled": False, # Test LTM disabled state
+            "long_term_memory_enabled": False,
             "suggested_prompts": ["Hello ESI", "What can you do?"]
         })
 
-        # --- Mock Callbacks for Standalone Test ---
         async def mock_handle_input_app(text):
             print(f"APP_MOCK: User input: {text}")
-            app.storage.user["messages"].append({"role": "user", "content": text})
-            # Simulate agent response
-            await app.loop.run_in_executor(None, time.sleep, 0.5) # Simulate delay
-            app.storage.user["messages"].append({"role": "assistant", "content": f"NiceGUI echo: {text}"})
-
-            chat_area_ref = app.storage.user.get('chat_area_ref')
-            if chat_area_ref: await display_chat_messages(chat_area_ref) # Refresh chat
+            s_user = app.storage.user
+            current_chat_id = s_user["current_chat_id"]
+            s_user["messages"][current_chat_id].append({"role": "user", "content": text})
+            await app.loop.run_in_executor(None, time.sleep, 0.5)
+            s_user["messages"][current_chat_id].append({"role": "assistant", "content": f"NiceGUI echo: {text}"})
+            chat_area_ref = s_user.get('chat_area_ref')
+            if chat_area_ref: await display_chat_messages(chat_area_ref)
+            suggested_prompts_ref = s_user.get('suggested_prompts_container_ref')
+            if suggested_prompts_ref: await suggested_prompts_ref.refresh()
 
         async def mock_handle_upload_app(name, content, content_type):
             print(f"APP_MOCK: File upload: {name}, type: {content_type}, size: {len(content)}")
-            app.storage.user.setdefault("uploaded_documents", {})[name] = f"Mock content for {name}"
-            app.storage.user["messages"].append({"role": "assistant", "content": f"File '{name}' received by mock app."})
-
-            chat_area_ref = app.storage.user.get('chat_area_ref')
+            s_user = app.storage.user
+            if content_type and ("text" in content_type or name.lower().endswith(('.txt', '.md'))):
+                s_user.setdefault("uploaded_documents", {})[name] = content # Store bytes
+            elif content_type and ("csv" in content_type or name.lower().endswith(('.csv', '.xlsx', '.sav'))):
+                s_user.setdefault("uploaded_dataframes", {})[name] = content # Store bytes
+            s_user["messages"][s_user["current_chat_id"]].append({"role": "assistant", "content": f"File '{name}' received by mock app."})
+            chat_area_ref = s_user.get('chat_area_ref')
             if chat_area_ref: await display_chat_messages(chat_area_ref)
-
-            files_refresher = app.storage.user.get('uploaded_files_list_refresher_ui')
-            if files_refresher: files_refresher.refresh()
+            files_refresher = s_user.get('ui_uploaded_files_container_ref')
+            if files_refresher: await files_refresher.refresh()
 
         async def mock_remove_file_app(ftype, fname):
             print(f"APP_MOCK: Remove file: {ftype} - {fname}")
-            if ftype == "document" and fname in app.storage.user.get("uploaded_documents", {}):
-                del app.storage.user["uploaded_documents"][fname]
-            files_refresher = app.storage.user.get('uploaded_files_list_refresher_ui')
-            if files_refresher: files_refresher.refresh()
+            s_user = app.storage.user
+            if ftype == "document" and fname in s_user.get("uploaded_documents", {}):
+                del s_user["uploaded_documents"][fname]
+            elif ftype == "dataframe" and fname in s_user.get("uploaded_dataframes", {}):
+                del s_user["uploaded_dataframes"][fname]
+            files_refresher = s_user.get('ui_uploaded_files_container_ref')
+            if files_refresher: await files_refresher.refresh()
 
         async def mock_set_ltm(val: bool):
             print(f"APP_MOCK: Set LTM to {val}")
-            app.storage.user['long_term_memory_enabled'] = val
-            # This would typically trigger a larger UI refresh or state reload in a full app
-            # For this test, we might need to manually refresh relevant parts or the whole page
-            # For now, let the create_nicegui_interface re-render based on this new state.
-            # This requires the main content area to be refreshable.
-            main_content_ref = app.storage.user.get('main_content_ref_for_test')
-            if main_content_ref: main_content_ref.refresh()
-
-
-        # Main UI building call
-        # The create_nicegui_interface will set up app_callbacks with these mocks
-        # It will also return containers that app.py (or this test setup) can manage.
-        # We need a refreshable main content area for LTM toggle to work visually in test.
-        @ui.refreshable
-        async def build_test_content():
-            # Retrieve the latest state from app.storage.user for each build/refresh
             s_user = app.storage.user
-            create_nicegui_interface(
-                ext_handle_user_input_callback=mock_handle_input_app,
-                ext_handle_file_upload_app_callback=mock_handle_upload_app,
-                ext_remove_file_app_callback=mock_remove_file_app,
-                ext_set_long_term_memory_callback=mock_set_ltm,
-                # Provide other mocks or simple lambdas
-                ext_reset_callback=lambda: print("Mock Reset"),
-                ext_new_chat_callback=lambda: print("Mock New Chat"),
-                ext_delete_chat_callback=lambda cid: print(f"Mock Delete: {cid}"),
-                ext_rename_chat_callback=lambda cid, name: print(f"Mock Rename: {cid} to {name}"),
-                ext_switch_chat_callback=lambda cid: print(f"Mock Switch: {cid}"),
-                ext_get_discussion_markdown_callback=lambda cid: f"## Markdown for {cid}\n- Point 1",
-                ext_get_discussion_docx_callback=lambda cid: b"DOCX_CONTENT_FOR_" + cid.encode(),
-                ext_forget_me_callback=lambda: print("Mock Forget Me"),
-                ext_regenerate_callback=lambda: print("Mock Regenerate"),
-                current_chat_id_val=s_user.get("current_chat_id"),
-                chat_metadata_val=s_user.get("chat_metadata", {}),
-                llm_temp_val=s_user.get("llm_temperature"),
-                llm_verb_val=s_user.get("llm_verbosity"),
-                search_count_val=s_user.get("search_results_count"),
-                ltm_enabled_val=s_user.get("long_term_memory_enabled"),
-                suggested_prompts_list_val=s_user.get("suggested_prompts")
-            )
-            # After UI is created, populate dynamic parts
-            chat_area_r = app.storage.user.get('chat_area_ref')
-            if chat_area_r: await display_chat_messages(chat_area_r)
+            s_user['long_term_memory_enabled'] = val
+            if 'chat_list_container_ref' in s_user: await s_user['chat_list_container_ref'].refresh()
+            if 'chat_area_ref' in s_user: await s_user['chat_area_ref'].refresh()
+            if 'suggested_prompts_container_ref' in s_user: await s_user['suggested_prompts_container_ref'].refresh()
 
-            # Setup and call the uploaded files list builder
-            uploaded_files_container = app.storage.user.get('ui_uploaded_files_container_ref')
-            if uploaded_files_container:
-                @ui.refreshable
-                def _build_test_uploaded_files():
-                    s_user_files = app.storage.user
-                    docs = s_user_files.get("uploaded_documents", {})
-                    uploaded_files_container.clear()
-                    with uploaded_files_container:
-                        if docs:
-                            ui.label("Documents:").classes("text-caption")
-                            for name_ in docs:
-                                with ui.row().classes('w-full items-center'):
-                                    ui.icon('description'); ui.label(name_).classes('flex-grow')
-                                    ui.button(icon='delete', on_click=lambda n=name_: mock_remove_file_app("document", n)).props('flat dense round color=negative')
-                        if not docs: ui.label("No files uploaded.").classes('q-pa-sm text-italic')
-                app.storage.user['uploaded_files_list_refresher_ui'] = _build_test_uploaded_files
-                _build_test_uploaded_files()
+        async def mock_new_chat():
+            s_user = app.storage.user
+            new_id = str(uuid.uuid4())
+            s_user["chat_metadata"][new_id] = f"Mock Chat {len(s_user['chat_metadata']) + 1}"
+            s_user["messages"][new_id] = [{"role": "assistant", "content": "New mock chat started!"}]
+            s_user["current_chat_id"] = new_id
+            s_user["suggested_prompts"] = ["New mock prompt 1", "New mock prompt 2"]
+            if 'chat_list_container_ref' in s_user: await s_user['chat_list_container_ref'].refresh()
+            if 'chat_area_ref' in s_user: await display_chat_messages(s_user['chat_area_ref'])
+            if 'suggested_prompts_container_ref' in s_user: await s_user['suggested_prompts_container_ref'].refresh()
 
-        app.storage.user['main_content_ref_for_test'] = build_test_content
-        await build_test_content()
+        async def mock_delete_chat(chat_id: str):
+            s_user = app.storage.user
+            if chat_id in s_user["chat_metadata"]:
+                del s_user["chat_metadata"][chat_id]
+                del s_user["messages"][chat_id]
+                if s_user["current_chat_id"] == chat_id:
+                    if s_user["chat_metadata"]:
+                        s_user["current_chat_id"] = next(iter(s_user["chat_metadata"]))
+                    else:
+                        s_user["current_chat_id"] = None
+                if 'chat_list_container_ref' in s_user: await s_user['chat_list_container_ref'].refresh()
+                if 'chat_area_ref' in s_user: await display_chat_messages(s_user['chat_area_ref'])
+                if 'suggested_prompts_container_ref' in s_user: await s_user['suggested_prompts_container_ref'].refresh()
 
+        async def mock_rename_chat(chat_id: str, new_name: str):
+            s_user = app.storage.user
+            if chat_id in s_user["chat_metadata"]:
+                s_user["chat_metadata"][chat_id] = new_name
+                if 'chat_list_container_ref' in s_user: await s_user['chat_list_container_ref'].refresh()
+
+        async def mock_switch_chat(chat_id: str):
+            s_user = app.storage.user
+            s_user["current_chat_id"] = chat_id
+            s_user["suggested_prompts"] = [f"Prompt for {chat_id} 1", f"Prompt for {chat_id} 2"]
+            if 'chat_area_ref' in s_user: await display_chat_messages(s_user['chat_area_ref'])
+            if 'suggested_prompts_container_ref' in s_user: await s_user['suggested_prompts_container_ref'].refresh()
+
+        async def mock_regenerate():
+            s_user = app.storage.user
+            current_chat_id = s_user["current_chat_id"]
+            messages = s_user["messages"][current_chat_id]
+            if messages and messages[-1]["role"] == "user":
+                last_user_input = messages[-1]["content"]
+                messages.append({"role": "assistant", "content": f"Regenerated: {last_user_input}"})
+            elif messages and messages[-1]["role"] == "assistant" and len(messages) > 1 and messages[-2]["role"] == "user":
+                last_user_input = messages[-2]["content"]
+                messages[-1]["content"] = f"Regenerated: {last_user_input}"
+            if 'chat_area_ref' in s_user: await display_chat_messages(s_user['chat_area_ref'])
+            if 'suggested_prompts_container_ref' in s_user: await s_user['suggested_prompts_container_ref'].refresh()
+
+        s_user = app.storage.user
+        chat_area_ref, suggested_prompts_ref, uploaded_files_ref, chat_list_ref = create_nicegui_interface(
+            ext_handle_user_input_callback=mock_handle_input_app,
+            ext_handle_file_upload_app_callback=mock_handle_upload_app,
+            ext_remove_file_app_callback=mock_remove_file_app,
+            ext_set_long_term_memory_callback=mock_set_ltm,
+            ext_reset_callback=mock_new_chat,
+            ext_new_chat_callback=mock_new_chat,
+            ext_delete_chat_callback=mock_delete_chat,
+            ext_rename_chat_callback=mock_rename_chat,
+            ext_switch_chat_callback=mock_switch_chat,
+            ext_get_discussion_markdown_callback=lambda cid: f"## Markdown for {cid}\n- Point 1",
+            ext_get_discussion_docx_callback=lambda cid: b"DOCX_CONTENT_FOR_" + cid.encode(),
+            ext_forget_me_callback=lambda: print("Mock Forget Me"),
+            ext_regenerate_callback=mock_regenerate,
+            current_chat_id_val=s_user.get("current_chat_id"),
+            chat_metadata_val=s_user.get("chat_metadata", {}),
+            llm_temp_val=s_user.get("llm_temperature"),
+            llm_verb_val=s_user.get("llm_verbosity"),
+            search_count_val=s_user.get("search_results_count"),
+            ltm_enabled_val=s_user.get("long_term_memory_enabled"),
+            suggested_prompts_list_val=s_user.get("suggested_prompts")
+        )
+        s_user['chat_area_ref'] = chat_area_ref
+        s_user['suggested_prompts_container_ref'] = suggested_prompts_ref
+        s_user['ui_uploaded_files_container_ref'] = uploaded_files_ref
+        s_user['chat_list_container_ref'] = chat_list_ref
+
+        await display_chat_messages(chat_area_ref)
+        await uploaded_files_ref.refresh()
+        await suggested_prompts_ref.refresh()
+        await chat_list_ref.refresh()
 
     app.add_static_files('/workspace', UI_ACCESSIBLE_WORKSPACE)
     mimetypes.add_type('application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.docx')
