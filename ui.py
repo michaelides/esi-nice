@@ -331,6 +331,12 @@ def create_nicegui_interface(
 
 
 if __name__ == "__main__":
+    # Define storage paths for ui.run in standalone test mode
+    TEST_USER_STORAGE_DIR = os.path.join(PROJECT_ROOT, '.nicegui_test_storage', 'user')
+    TEST_GENERAL_STORAGE_FILE = os.path.join(PROJECT_ROOT, '.nicegui_test_storage', 'general.json')
+    os.makedirs(TEST_USER_STORAGE_DIR, exist_ok=True)
+    os.makedirs(os.path.dirname(TEST_GENERAL_STORAGE_FILE), exist_ok=True)
+
     @ui.page('/')
     async def index_page(client: Client):
         app.storage.user.clear()
@@ -476,4 +482,11 @@ if __name__ == "__main__":
 
     app.add_static_files('/workspace', UI_ACCESSIBLE_WORKSPACE)
     mimetypes.add_type('application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.docx')
-    ui.run(title="ESI NiceGUI Test", storage_secret=STORAGE_SECRET, host="0.0.0.0", port=8080)
+    ui.run(
+        title="ESI NiceGUI Test",
+        storage_secret=STORAGE_SECRET,
+        host="0.0.0.0",
+        port=8080,
+        user_storage_dir=TEST_USER_STORAGE_DIR,
+        general_storage_file=TEST_GENERAL_STORAGE_FILE,
+    )
