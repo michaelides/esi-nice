@@ -1,0 +1,44 @@
+[project]
+name = "esi"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "crawl4ai>=0.6.2",
+    "docx>=0.2.4",
+    "extra-streamlit-components>=0.1.80",
+    "fsspec>=2025.3.0",
+    "google-generativeai>=0.8.4",
+    "huggingface-hub>=0.30.2",
+    "llama-index>=0.12.34",
+    "llama-index-core>=0.12.33.post1",
+    "llama-index-embeddings-gemini>=0.3.2",
+    "llama-index-embeddings-google-genai>=0.1.0",
+    "llama-index-llms-gemini>=0.4.14",
+    "llama-index-readers-file>=0.4.7",
+    "llama-index-readers-semanticscholar>=0.3.0",
+    "llama-index-readers-web>=0.3.9",
+    "llama-index-tools-code-interpreter>=0.3.0",
+    "llama-index-tools-duckduckgo>=0.3.0",
+    "llama-index-tools-tavily-research>=0.3.0",
+    "llama-index-tools-wikipedia>=0.3.0",
+    "llama-index-vector-stores-chroma>=0.4.1",
+    "matplotlib>=3.10.1",
+    "numpy>=2.2.5",
+    "openpyxl>=3.1.5",
+    "pandas>=2.2.3",
+    "pypdf>=5.4.0",
+    "pyproject-toml>=0.1.0",
+    "pyr>=0.4",
+    "pyreadr>=0.5.3",
+    "pyreadstat>=1.2.9",
+    "python-docx>=1.1.2",
+    "rpy2>=3.6.1",
+    "scipy>=1.15.3",
+    "statsmodels>=0.14.4",
+    "streamlit>=1.45.0",
+    "tavily-python>=0.7.0",
+    "trafilatura>=2.0.0",
+    "wikipedia>=1.4.0", # Added for Hugging Face datasets
+]
