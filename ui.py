@@ -11,6 +11,7 @@ import io
 import mimetypes
 from dotenv import load_dotenv
 import time # For standalone test sleep
+import uuid # Import the uuid module
 
 PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 UI_ACCESSIBLE_WORKSPACE = os.path.join(PROJECT_ROOT, "workspace_ui_accessible")
