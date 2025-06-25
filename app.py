@@ -638,7 +638,7 @@ async def main_page(client: Client):
         dialog.open()
         
         # CRITICAL CHANGE: Call setup_agent_for_client directly from Python
-        agent_instance, error = setup_agent_for_client(client, config.MAX_SEARCH_RESULTS)
+        agent_instance, error = setup_agent_for_client(client, 5)
         
         dialog.close()
         if error:
