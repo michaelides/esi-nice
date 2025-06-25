@@ -39,7 +39,7 @@ def initialize_settings():
     google_api_key = os.getenv("GOOGLE_API_KEY")
     if not google_api_key:
         raise ValueError("GOOGLE_API_KEY not found in environment variables.")
-
+    print(f"DEBUG: GOOGLE_API_KEY loaded by agent.py: {google_api_key}")                                                                                                      
     # Use Google Generative AI Embeddings
     Settings.embed_model = GoogleGenAIEmbedding(model_name="models/text-embedding-004", api_key=google_api_key)
     # Use a potentially more stable model name and set a default temperature
