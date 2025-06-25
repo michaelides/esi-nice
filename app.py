@@ -250,7 +250,9 @@ async def get_agent_response_stream(query: str, chat_history: List[ChatMessage])
     """
     Streams responses from the AI agent.
     """
-    agent_instance = ui.current.client.shared.get(AGENT_INSTANCE_KEY)
+    # Use ui.context.client as this function is called from UI event handlers
+    client = ui.context.client
+    agent_instance = client.shared.get(AGENT_INSTANCE_KEY)
     if not agent_instance:
         yield "Error: AI agent not initialized. Please refresh the page."
         return
@@ -418,12 +420,14 @@ async def forget_me_from_ui():
     chat_state.last_chat_history_before_regen = None
 
     # Reset agent instance in shared storage
-    agent_instance = ui.current.client.shared.get(AGENT_INSTANCE_KEY)
+    # Use ui.context.client as this function is called from UI event, not page load
+    client = ui.context.client
+    agent_instance = client.shared.get(AGENT_INSTANCE_KEY)
     if agent_instance:
         agent_instance.reset() # Call agent's reset method if it exists
-        del ui.current.client.shared[AGENT_INSTANCE_KEY]
+        del client.shared[AGENT_INSTANCE_KEY]
 
-    await initialize_user_session_storage(force_reload=True) # Re-initialize session
+    await initialize_user_session_storage(client, force_reload=True) # Re-initialize session
     ui.notify("All your data has been forgotten.", type='positive')
 
 async def set_long_term_memory_from_ui(enabled: bool):
@@ -525,7 +529,7 @@ def save_chat_metadata_to_hf(user_id: str, chat_metadata: Dict[str, str]):
     # Implement actual saving to HF dataset here
     pass
 
-async def initialize_user_session_storage(force_reload: bool = False):
+async def initialize_user_session_storage(client: Client, force_reload: bool = False):
     """
     Initializes user-specific session storage from NiceGUI's app.storage.user.
     Loads existing chats, current chat ID, and preferences.
@@ -539,7 +543,7 @@ async def initialize_user_session_storage(force_reload: bool = False):
     # Load user ID
     user_id = _get_user_id_from_cookie()
     if not user_id:
-        user_id = str(ui.current.client.id) # Use NiceGUI client ID as user ID
+        user_id = str(client.id) # Use NiceGUI client ID as user ID
         _set_user_id_cookie(user_id)
         print(f"New user session. Assigned ID: {user_id}")
     else:
@@ -592,7 +596,9 @@ async def initialize_active_chat_session(new_chat: bool = False):
     Ensures there's an active chat session. Creates a new one if needed or requested.
     """
     if new_chat or not chat_state.current_chat_id or chat_state.current_chat_id not in chat_state.chat_history:
-        new_chat_id = str(ui.current.client.id) + "_" + str(len(chat_state.chat_history) + 1)
+        # Use ui.context.client as this function can be called from various UI events
+        client_id = str(ui.context.client.id)
+        new_chat_id = client_id + "_" + str(len(chat_state.chat_history) + 1)
         chat_state.chat_history[new_chat_id] = []
         chat_state.chat_names[new_chat_id] = f"New Chat {len(chat_state.chat_history)}"
         chat_state.current_chat_id = new_chat_id
@@ -613,7 +619,7 @@ async def main_page(client: Client):
     print(f"DEBUG: Value of client.shared: {client.shared}")
 
     # Initialize user session storage and load data
-    await initialize_user_session_storage()
+    await initialize_user_session_storage(client)
 
     print(f"DEBUG: After initialize_user_session_storage, type of client.shared: {type(client.shared)}")
     print(f"DEBUG: Value of client.shared: {client.shared}")
