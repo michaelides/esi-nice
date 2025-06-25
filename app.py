@@ -677,5 +677,5 @@ async def main_page(client: Client):
     )
 
 # CRITICAL CHANGE: Uncomment this block if app.py is your main entry point
-if __name__ == "__main__":
+if __name__ in {"__main__", "__mp_main__"}:
     ui.run(storage_secret=STORAGE_SECRET)

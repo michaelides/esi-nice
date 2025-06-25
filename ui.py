@@ -374,7 +374,7 @@ def create_nicegui_interface(
             ui.notify("DOCX download handler not set.", type='negative')
 
 
-if __name__ == "__main__":
+if __name__ in {"__main__", "__mp_main__"}:
     # Define storage paths for ui.run in standalone test mode
     TEST_USER_STORAGE_DIR = os.path.join(PROJECT_ROOT, '.nicegui_test_storage', 'user')
     TEST_GENERAL_STORAGE_DIR = os.path.join(PROJECT_ROOT, '.nicegui_test_storage', 'general')
