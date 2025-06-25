@@ -1,32 +1,42 @@
-from nicegui import ui, app, Client
-from typing import List, Dict, Any, Optional, Callable, Coroutine, Tuple
 import os
-import re
-import json
-import html
-import pandas as pd
-from PyPDF2 import PdfReader
-from docx import Document
-import io
-import mimetypes
-from dotenv import load_dotenv
-import time # For standalone test sleep
-import uuid # Import the uuid module
+import uuid
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
+from nicegui import ui, app, Client
+from nicegui.events import UploadEventArguments
+from nicegui.elements.markdown import Markdown
+import asyncio
 
+# Assuming PROJECT_ROOT is defined in config.py or similar, or define it here
 PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 UI_ACCESSIBLE_WORKSPACE = os.path.join(PROJECT_ROOT, "workspace_ui_accessible")
 os.makedirs(UI_ACCESSIBLE_WORKSPACE, exist_ok=True)
-STORAGE_SECRET = os.environ.get("STORAGE_SECRET",)
+
+# Fix: Provide a default string for STORAGE_SECRET to prevent it from being None
+STORAGE_SECRET = os.environ.get("STORAGE_SECRET", "a_fallback_secret_for_dev")
+
+# Configure NiceGUI storage for UI-specific test runs
+app.storage.TEMP_BASE_DIR = ".nicegui"
+app.storage.user.set_storage_secret(STORAGE_SECRET)
+
 CODE_DOWNLOAD_MARKER = "---DOWNLOAD_FILE---"
 RAG_SOURCE_MARKER = "---RAG_SOURCE---"
 
 class ChatState:
     def __init__(self):
-        self.chat_input_value: Optional[str] = ""
+        self.current_chat_id: Optional[str] = None
+        self.chat_history: Dict[str, List[Dict[str, Any]]] = {}
+        self.chat_names: Dict[str, str] = {}
+        self.uploaded_files: Dict[str, Dict[str, Any]] = {} # {file_type: {filename: content_bytes}}
+        self.long_term_memory_enabled: bool = False
+        self.last_agent_response: Optional[str] = None # Store the last full agent response
+        self.last_user_query: Optional[str] = None # Store the last user query
+        self.last_chat_history_before_regen: Optional[List[Dict[str, Any]]] = None # Store history before last query
+        self.chat_input_value: str = "" # To store the current value of the chat input
 
     def set_chat_input_value(self, value: str):
         self.chat_input_value = value
 
+# This chat_state instance will be passed from app.py
 chat_state = ChatState()
 
 class AppCallbacks:
@@ -42,114 +52,126 @@ class AppCallbacks:
         self.forget_me: Optional[Callable[[], Coroutine[Any, Any, None]]] = None
         self.set_long_term_memory: Optional[Callable[[bool], Coroutine[Any, Any, None]]] = None
         self.regenerate_last_response: Optional[Callable[[], Coroutine[Any, Any, None]]] = None
-        self.handle_file_upload_app: Optional[Callable[[str, bytes, Optional[str]], Coroutine[Any, Any, None]]] = None
-        self.remove_file_app: Optional[Callable[[str, str], Coroutine[Any, Any, None]]] = None
+        self.handle_file_upload: Optional[Callable[[str, bytes, Optional[str]], Coroutine[Any, Any, None]]] = None
+        self.remove_file: Optional[Callable[[str, str], Coroutine[Any, Any, None]]] = None
+        self.get_initial_greeting_text_cached: Optional[Callable[[], str]] = None
+        self.generate_suggested_prompts_cached: Optional[Callable[[Tuple], List[str]]] = None
 
 app_callbacks = AppCallbacks()
 
 async def display_chat_messages(chat_container: ui.column):
-    s = app.storage.user
-    current_chat_id = s.get("current_chat_id")
-    if not current_chat_id:
-        chat_container.clear()
-        with chat_container:
-            ui.label("Start a new chat to begin!").classes('text-italic text-center w-full')
+    """
+    Displays chat messages in the UI, including streaming responses.
+    """
+    chat_container.clear()
+    if not chat_state.current_chat_id:
+        chat_container.add(ui.label("Start a new chat or select an existing one.").classes("text-grey-6"))
         return
 
-    messages_to_display = s.get("messages", {}).get(current_chat_id, [])
+    messages = chat_state.chat_history.get(chat_state.current_chat_id, [])
+    
+    for i, msg in enumerate(messages):
+        is_user = msg["role"] == "user"
+        with chat_container.row().classes('w-full no-wrap' + ('justify-end' if is_user else '')):
+            with ui.card().classes('max-w-[70%] ' + ('bg-blue-100' if is_user else 'bg-gray-100')):
+                ui.label(msg["content"]).classes('whitespace-pre-wrap')
+                if not is_user:
+                    # Add copy button for assistant messages
+                    ui.icon('content_copy') \
+                        .classes('absolute top-2 right-2 cursor-pointer text-gray-500 hover:text-gray-800') \
+                        .on('click', lambda msg=msg, i=i: copy_to_clipboard(msg["content"], i))
 
-    chat_container.clear()
-    with chat_container:
-        for msg_idx, message in enumerate(messages_to_display):
-            is_user = message["role"] == "user"
-            content = message["content"]
-            text_for_message = content
-            rag_sources_data = []
-            code_download_filename = None
-            code_is_image = False
-
-            if message["role"] == "assistant":
-                rag_source_pattern = re.compile(rf"{re.escape(RAG_SOURCE_MARKER)}({{\"type\":.*?}})", re.DOTALL)
-                processed_text_after_rag = text_for_message
-                for match in reversed(list(rag_source_pattern.finditer(text_for_message))):
-                    json_str = match.group(1)
-                    try: rag_sources_data.append(json.loads(json_str))
-                    except json.JSONDecodeError as e: print(f"UI Warning: Could not decode RAG JSON: {e}")
-                    processed_text_after_rag = processed_text_after_rag[:match.start()] + processed_text_after_rag[match.end():]
-                text_for_message = processed_text_after_rag.strip()
-
-                code_marker_match = re.search(rf"^{re.escape(CODE_DOWNLOAD_MARKER)}(.*)$", text_for_message, re.MULTILINE | re.IGNORECASE)
-                if code_marker_match:
-                    extracted_filename = code_marker_match.group(1).strip()
-                    text_for_message = text_for_message[:code_marker_match.start()].strip() + text_for_message[code_marker_match.end():].strip()
-                    code_download_filename = extracted_filename
-                    if os.path.exists(os.path.join(UI_ACCESSIBLE_WORKSPACE, extracted_filename)):
-                        if os.path.splitext(code_download_filename)[1].lower() in ['.png', '.jpg', '.jpeg', '.gif']:
-                            code_is_image = True
-                    else:
-                        text_for_message += f"\n\n*(UI Warning: File '{extracted_filename}' for download not in workspace.)*"
-
-            with ui.chat_message(name=message["role"].title(), sent=is_user, avatar=f"https://robohash.org/{message['role']}?set=set4&size=50x50"):
-                if text_for_message: ui.markdown(text_for_message)
-
-                rag_sources_data.sort(key=lambda x: x.get('citation_number', float('inf')) if x.get('type') == 'pdf' else x.get('url', x.get('title', '')))
-                displayed_rag_ids = set()
-                for rag_data in rag_sources_data:
-                    stype, ident, ditem = rag_data.get("type"), None, False
-                    if stype == "pdf":
-                        name, path = rag_data.get("name","s.pdf"), rag_data.get("path")
-                        cite = f"[{rag_data.get('citation_number')}] " if rag_data.get('citation_number') else ""
-                        ident = path
-                        if ident and ident not in displayed_rag_ids:
-                            if path and path.startswith("http"):
-                                ui.html(f"Src: {cite}<a href='{path}' target='_blank'>{html.escape(name)}</a>"); ditem=True
-                            elif path and path.startswith("file://"):
-                                f_ws = os.path.join(UI_ACCESSIBLE_WORKSPACE, os.path.basename(path[len("file://"):]))
-                                if os.path.exists(f_ws):
-                                    dl_url = f"/workspace/{os.path.basename(f_ws)}"
-                                    ui.html(f"Src: {cite}<a href='{dl_url}' target='_blank' download='{html.escape(name)}'>DL PDF: {html.escape(name)}</a>"); ditem=True
-                                else: ui.label(f"PDF '{name}' missing.").classes('text-warning')
-                    elif stype == "web":
-                        url, title = rag_data.get("url"), rag_data.get("title", "Web Src")
-                        ident = url
-                        if ident and ident not in displayed_rag_ids and url:
-                            ui.html(f"Src: <a href='{url}' target='_blank'>{html.escape(title)}</a>"); ditem=True
-                    if ditem and ident: displayed_rag_ids.add(ident); ui.separator()
-
-                if code_download_filename:
-                    f_path_ws = os.path.join(UI_ACCESSIBLE_WORKSPACE, code_download_filename)
-                    if os.path.exists(f_path_ws):
-                        static_url = f"/workspace/{code_download_filename}"
-                        if code_is_image: ui.image(static_url).props('width=300px')
-                        else: ui.html(f"<a href='{static_url}' target='_blank' download='{html.escape(code_download_filename)}'>DL: {html.escape(code_download_filename)}</a>")
-
-            last_asst = (message["role"] == "assistant" and msg_idx == len(messages_to_display) - 1)
-            can_regen = last_asst and (len(messages_to_display) == 1 or (len(messages_to_display) > 1 and messages_to_display[msg_idx-1]["role"] == "user"))
-            with ui.row().classes('ml-8'):
-                ui.button(icon='content_copy', on_click=lambda c=text_for_message, i=msg_idx: copy_to_clipboard(c,i)).props('flat dense round')
-                if can_regen and app_callbacks.regenerate_last_response:
-                    ui.button(icon='refresh', on_click=app_callbacks.regenerate_last_response).props('flat dense round')
+    # If the last message is from the assistant and it's still streaming, handle it
+    # This logic might need to be more sophisticated if streaming is handled directly in handle_user_input_from_ui
+    # For now, assuming full messages are added to history before display_chat_messages is called.
+    # If streaming, you'd typically have a placeholder message and update its content.
 
 async def copy_to_clipboard(text_to_copy: str, msg_idx: int):
-    escaped_text = json.dumps(text_to_copy)
-    await ui.run_javascript(f"navigator.clipboard.writeText({escaped_text})", timeout=5.0)
-    ui.notify(f"Message {msg_idx + 1} content copied!", icon="📋")
+    """Copies text to clipboard and shows a notification."""
+    await ui.run_javascript(f'navigator.clipboard.writeText(`{text_to_copy.replace("`", "\\`")}`)')
+    ui.notify(f'Message {msg_idx+1} copied to clipboard!', type='info', timeout=1000)
 
 async def handle_send_message():
-    user_input = chat_state.chat_input_value
-    if user_input and app_callbacks.handle_user_input:
-        chat_state.set_chat_input_value("")
-        await app_callbacks.handle_user_input(user_input)
+    """
+    Handles sending a message from the chat input.
+    """
+    user_input = chat_state.chat_input_value.strip()
+    if not user_input:
+        return
+
+    chat_state.set_chat_input_value("") # Clear input immediately
+    chat_input_ui.refresh() # Refresh the input field
+
+    # Add user message to UI immediately
+    if not chat_state.current_chat_id:
+        # This should ideally be handled by app.py's initialize_active_chat_session
+        # but as a fallback, ensure a chat exists.
+        await app_callbacks.new_chat()
+        chat_list_container_ui.refresh() # Refresh chat list to show new chat
+
+    chat_state.chat_history[chat_state.current_chat_id].append({"role": "user", "content": user_input})
+    await display_chat_messages(chat_area) # Update UI with user message
+
+    # Add a placeholder for the assistant's response
+    assistant_message_placeholder = {"role": "assistant", "content": "..."}
+    chat_state.chat_history[chat_state.current_chat_id].append(assistant_message_placeholder)
+    await display_chat_messages(chat_area) # Update UI with placeholder
+
+    # Scroll to bottom
+    await ui.run_javascript('var element = document.querySelector(".q-page-container > div > div"); element.scrollTop = element.scrollHeight;', timeout=0.5)
+
+    full_response_content = ""
+    try:
+        # Call the app-level handler to get the streaming response
+        async for chunk in app_callbacks.handle_user_input(user_input):
+            full_response_content += chunk
+            # Update the last assistant message in chat_state.chat_history
+            if chat_state.chat_history[chat_state.current_chat_id][-1] is assistant_message_placeholder:
+                assistant_message_placeholder["content"] = full_response_content
+            else:
+                # This case should ideally not happen if placeholder logic is correct
+                # But as a fallback, append if somehow missing
+                chat_state.chat_history[chat_state.current_chat_id].append({"role": "assistant", "content": full_response_content})
+            await display_chat_messages(chat_area) # Refresh UI with new chunk
+            await ui.run_javascript('var element = document.querySelector(".q-page-container > div > div"); element.scrollTop = element.scrollHeight;', timeout=0.5)
+    except Exception as e:
+        error_message = f"Error during response streaming: {e}"
+        print(error_message)
+        if chat_state.chat_history[chat_state.current_chat_id][-1] is assistant_message_placeholder:
+            assistant_message_placeholder["content"] = f"Error: {error_message}"
+        else:
+            chat_state.chat_history[chat_state.current_chat_id].append({"role": "assistant", "content": f"Error: {error_message}"})
+        await display_chat_messages(chat_area) # Show error in UI
+
+    # After streaming, ensure the final message is stored and UI is updated
+    # The app_callbacks.handle_user_input is expected to update app.storage.user
+    # and chat_state.chat_history with the final message.
+    # So, a final refresh of display_chat_messages should suffice.
+    await display_chat_messages(chat_area)
+    chat_list_container_ui.refresh() # Refresh chat list to show updated chat (e.g., last message preview)
+    suggested_prompts_container_ui.refresh() # Refresh suggested prompts
 
 async def handle_suggested_prompt(prompt: str):
-    if app_callbacks.handle_user_input:
-        await app_callbacks.handle_user_input(prompt)
+    """
+    Handles a click on a suggested prompt.
+    """
+    chat_state.set_chat_input_value(prompt)
+    chat_input_ui.refresh()
+    await handle_send_message()
 
-async def handle_ui_file_upload(e: Any):
-    if app_callbacks.handle_file_upload_app:
-        file_content = e.content.read() if hasattr(e.content, 'read') else e.content
-        await app_callbacks.handle_file_upload_app(e.name, file_content, e.type)
-    else: ui.notify("File upload processing not configured.", type='negative')
+async def handle_ui_file_upload(e: UploadEventArguments):
+    """
+    Handles file uploads from the UI.
+    """
+    file_name = e.name
+    file_content_bytes = e.content.read()
+    content_type = e.content_type
+
+    if app_callbacks.handle_file_upload:
+        await app_callbacks.handle_file_upload(file_name, file_content_bytes, content_type)
+        uploaded_files_list_ui.refresh()
+    else:
+        ui.notify("File upload handler not set.", type='negative')
 
 def create_nicegui_interface(
     ext_handle_user_input_callback: Callable[[str], Coroutine[Any, Any, None]],
@@ -162,18 +184,19 @@ def create_nicegui_interface(
     ext_get_discussion_docx_callback: Callable[[str], bytes],
     ext_forget_me_callback: Callable[[], Coroutine[Any, Any, None]],
     ext_set_long_term_memory_callback: Callable[[bool], Coroutine[Any, Any, None]],
-    ext_regenerate_callback: Callable[[], Coroutine[Any, Any, None]],
-    ext_handle_file_upload_app_callback: Callable[[str, bytes, Optional[str]], Coroutine[Any, Any, None]],
-    ext_remove_file_app_callback: Callable[[str, str], Coroutine[Any, Any, None]],
-    current_chat_id_val: Optional[str],
-    chat_metadata_val: Dict[str, str],
-    llm_temp_val: float,
-    llm_verb_val: int,
-    search_count_val: int,
-    ltm_enabled_val: bool,
-    suggested_prompts_list_val: Optional[List[str]]
-) -> Tuple[ui.column, ui.refreshable, ui.refreshable, ui.refreshable]: # Return refreshable functions
-    global app_callbacks
+    ext_regenerate_last_response_callback: Callable[[], Coroutine[Any, Any, None]],
+    ext_handle_file_upload_callback: Callable[[str, bytes, Optional[str]], Coroutine[Any, Any, None]],
+    ext_remove_file_callback: Callable[[str, str], Coroutine[Any, Any, None]],
+    chat_state: ChatState, # Receive the chat_state instance
+    get_initial_greeting_text_cached: Callable[[], str],
+    generate_suggested_prompts_cached: Callable[[Tuple], List[str]]
+):
+    """
+    Creates the main NiceGUI interface for the chat application.
+    """
+    global app_callbacks, chat_input_ui, chat_area, chat_list_container_ui, suggested_prompts_container_ui, uploaded_files_list_ui
+    
+    # Assign external callbacks to the global app_callbacks instance
     app_callbacks.handle_user_input = ext_handle_user_input_callback
     app_callbacks.reset_chat = ext_reset_callback
     app_callbacks.new_chat = ext_new_chat_callback
@@ -184,314 +207,302 @@ def create_nicegui_interface(
     app_callbacks.get_discussion_docx = ext_get_discussion_docx_callback
     app_callbacks.forget_me = ext_forget_me_callback
     app_callbacks.set_long_term_memory = ext_set_long_term_memory_callback
-    app_callbacks.regenerate_last_response = ext_regenerate_callback
-    app_callbacks.handle_file_upload_app = ext_handle_file_upload_app_callback
-    app_callbacks.remove_file_app = ext_remove_file_app_callback
+    app_callbacks.regenerate_last_response = ext_regenerate_last_response_callback
+    app_callbacks.handle_file_upload = ext_handle_file_upload_callback
+    app_callbacks.remove_file = ext_remove_file_callback
+    app_callbacks.get_initial_greeting_text_cached = get_initial_greeting_text_cached
+    app_callbacks.generate_suggested_prompts_cached = generate_suggested_prompts_cached
 
-    with ui.header(elevated=True).classes('bg-primary text-white'):
-        ui.label("🎓 ESI: ESI Scholarly Instructor").classes('text-h5')
+    # Assign the passed chat_state to the global one in ui.py
+    globals()['chat_state'] = chat_state
+
+    ui.add_head_html('<style>html { scroll-behavior: smooth; }</style>')
+    ui.colors(primary='#585858', secondary='#F0F0F0', accent='#6C6C6C', positive='#21BA45', negative='#C10015', info='#31CCEC', warning='#FB8C00')
+
+    with ui.header().classes('items-center justify-between text-white bg-primary'):
+        ui.label('Research Assistant').classes('text-h5')
+        with ui.row().classes('items-center'):
+            ui.button(icon='add', on_click=lambda: app_callbacks.new_chat()).tooltip('New Chat')
+            ui.button(icon='refresh', on_click=lambda: app_callbacks.regenerate_last_response()).tooltip('Regenerate Last Response')
+            ui.checkbox('Long-Term Memory', value=chat_state.long_term_memory_enabled, on_change=lambda e: app_callbacks.set_long_term_memory(e.value)).props('dark')
+            ui.button(icon='delete_forever', on_click=lambda: app_callbacks.forget_me()).tooltip('Forget All My Data')
 
     with ui.left_drawer(value=True, bordered=True).props('width=300'):
         ui.label("Chat Controls & Settings").classes("text-h6 q-pa-md")
         
         @ui.refreshable
         def chat_list_container_ui():
-            s_user = app.storage.user
-            current_meta = s_user.get("chat_metadata", {})
-            curr_chat_id = s_user.get("current_chat_id")
+            ui.separator()
+            ui.label("Your Chats").classes("text-subtitle1 q-mt-md q-mb-sm")
+            if not chat_state.chat_names:
+                ui.label("No chats yet. Start a new one!").classes("text-grey-6")
+            else:
+                with ui.list().classes('w-full'):
+                    for chat_id, chat_name in chat_state.chat_names.items():
+                        with ui.item().classes('w-full') as item:
+                            item.props(f'clickable {"bg-blue-1" if chat_id == chat_state.current_chat_id else ""}')
+                            item.on('click', lambda chat_id=chat_id: app_callbacks.switch_chat(chat_id))
+                            with ui.item_section():
+                                ui.item_label(chat_name)
+                                # Show a preview of the last message
+                                last_message = chat_state.chat_history.get(chat_id, [])[-1]["content"] if chat_state.chat_history.get(chat_id) else "Empty chat"
+                                ui.item_label(last_message).classes('text-caption text-grey-6 truncate')
+                            with ui.item_section().props('side'):
+                                with ui.icon('more_vert').props('size=sm').classes('cursor-pointer'):
+                                    with ui.menu() as menu:
+                                        ui.menu_item('Rename', on_click=lambda chat_id=chat_id, current_name=chat_name, menu=menu: handle_rename_chat_dialog(chat_id, current_name, menu))
+                                        ui.menu_item('Delete', on_click=lambda chat_id=chat_id, menu=menu: handle_delete_chat_confirm(chat_id, menu))
+                                        ui.separator()
+                                        ui.menu_item('Download as Markdown', on_click=lambda chat_id=chat_id, chat_name=chat_name, menu=menu: handle_download_md(chat_id, chat_name, menu))
+                                        ui.menu_item('Download as DOCX', on_click=lambda chat_id=chat_id, chat_name=chat_name, menu=menu: handle_download_docx(chat_id, chat_name, menu))
+        chat_list_container_ui()
 
-            with ui.expansion("Chat History", icon="forum").props('group="sidebar" expanded'):
-                if not s_user.get("long_term_memory_enabled", False):
-                    ui.label("LTM disabled. Chats are temporary.").classes("q-pa-sm text-warning")
-                    ui.button("➕ New Chat (Temp)", on_click=app_callbacks.new_chat).props('flat color=primary icon=add').classes('w-full')
-                else:
-                    ui.button("➕ New Chat", on_click=app_callbacks.new_chat).props('flat color=primary icon=add').classes('w-full')
-
-                if current_meta:
-                    for chat_id, chat_name in sorted(current_meta.items(), key=lambda item: item[1].lower()):
-                        with ui.row().classes('w-full items-center no-wrap'):
-                            is_c = (chat_id == curr_chat_id)
-                            btn_props = f'flat color="{"primary" if is_c else "grey-7"}" {"" if is_c else "text-color=dark"}'
-                            ui.button(chat_name, on_click=lambda cid=chat_id: app_callbacks.switch_chat(cid) if not is_c else None).props(btn_props).classes('flex-grow text-left')
-                            with ui.button(icon='more_vert').props('flat round dense'):
-                                with ui.menu() as menu:
-                                    ui.menu_item('Rename', on_click=lambda cid=chat_id, cname=chat_name, m=menu: handle_rename_chat_dialog(cid, cname, m))
-                                    ui.menu_item('Download MD', on_click=lambda cid=chat_id, cname=chat_name, m=menu: handle_download_md(cid, cname, m))
-                                    ui.menu_item('Download DOCX', on_click=lambda cid=chat_id, cname=chat_name, m=menu: handle_download_docx(cid, cname, m))
-                                    ui.menu_item('Delete', on_click=lambda cid=chat_id, m=menu: handle_delete_chat_confirm(cid, m))
-                else: ui.label("No saved chats.").classes('q-pa-sm text-italic')
+        ui.separator()
+        ui.label("Uploaded Files").classes("text-subtitle1 q-mt-md q-mb-sm")
+        ui.upload(on_upload=handle_ui_file_upload, auto_upload=True, multiple=True).props('accept=".pdf,.txt,.csv,.xlsx,.xls"') \
+            .classes('max-w-full')
         
-        chat_list_container_ui() # Initial call to create the refreshable content
-
         @ui.refreshable
         def uploaded_files_list_ui():
-            s_user = app.storage.user
-            uploaded_docs = s_user.get("uploaded_documents", {})
-            uploaded_dfs = s_user.get("uploaded_dataframes", {})
-            
-            with ui.expansion("Upload Files", icon="upload_file").props('group="sidebar"'):
-                ui.upload(label="Upload document or dataset", auto_upload=True, on_upload=handle_ui_file_upload, max_file_size=50*1024*1024).props('accept=".pdf,.docx,.md,.txt,.csv,.xlsx,.sav"')
-                
-                if uploaded_docs or uploaded_dfs:
-                    if uploaded_docs:
-                        ui.label("Documents:").classes("text-caption")
-                        for name_ in uploaded_docs:
-                            with ui.row().classes('w-full items-center'):
-                                ui.icon('description'); ui.label(name_).classes('flex-grow')
-                                ui.button(icon='delete', on_click=lambda n=name_: app_callbacks.remove_file_app("document", n)).props('flat dense round color=negative')
-                    if uploaded_dfs:
-                        ui.label("Dataframes:").classes("text-caption")
-                        for name_ in uploaded_dfs:
-                            with ui.row().classes('w-full items-center'):
-                                ui.icon('table_chart'); ui.label(name_).classes('flex-grow')
-                                ui.button(icon='delete', on_click=lambda n=name_: app_callbacks.remove_file_app("dataframe", n)).props('flat dense round color=negative')
-                else: ui.label("No files uploaded.").classes('q-pa-sm text-italic')
-        
-        uploaded_files_list_ui() # Initial call to create the refreshable content
+            if not chat_state.uploaded_files.get("document") and not chat_state.uploaded_files.get("dataframe"):
+                ui.label("No files uploaded yet.").classes("text-grey-6")
+            else:
+                with ui.list().classes('w-full'):
+                    for file_type, files in chat_state.uploaded_files.items():
+                        if files:
+                            ui.label(f"{file_type.capitalize()} Files:").classes("text-caption text-grey-7 q-mt-sm")
+                            for filename in files.keys():
+                                with ui.item().classes('w-full'):
+                                    with ui.item_section():
+                                        ui.item_label(filename)
+                                    with ui.item_section().props('side'):
+                                        ui.icon('delete', on_click=lambda ft=file_type, fn=filename: app_callbacks.remove_file(ft, fn)).classes('cursor-pointer text-negative')
+        uploaded_files_list_ui()
 
-        with ui.expansion("LLM Settings", icon="tune").props('group="sidebar"'):
-            ui.slider(min=0.0, max=2.0, step=0.1).bind_value(app.storage.user, 'llm_temperature').props('label="Creativity (Temp.)"')
-            ui.slider(min=1, max=5, step=1).bind_value(app.storage.user, 'llm_verbosity').props('label="Verbosity"')
-            ui.slider(min=3, max=15, step=1).bind_value(app.storage.user, 'search_results_count').props('label="Search Results"')
-            ui.switch("Enable Long-term Memory").bind_value(app.storage.user, 'long_term_memory_enabled').on_change(lambda e: app_callbacks.set_long_term_memory(e.value) if app_callbacks.set_long_term_memory else None)
-
-            with ui.column().bind_visibility_from(app.storage.user, 'long_term_memory_enabled'):
-                 with ui.button("Forget Me (Delete All Data)").props('color=negative flat').classes('w-full q-mt-md'):
-                    with ui.menu() as menu_f:
-                        ui.label("This will delete ALL saved data. Are you sure?").classes('q-pa-md bg-warning text-white')
-                        with ui.row():
-                            ui.button("Yes, Delete All", on_click=lambda: (app_callbacks.forget_me(), menu_f.close()) if app_callbacks.forget_me else menu_f.close(), color='negative')
-                            ui.button("Cancel", on_click=menu_f.close)
-            with ui.column().bind_visibility_from(app.storage.user, 'long_term_memory_enabled', backward=lambda x: not x):
-                 ui.label("Long-term memory disabled.").classes('q-pa-sm text-italic')
-
-
-        with ui.expansion("About ESI", icon="info").props('group="sidebar"'):
-            ui.markdown("ESI uses AI to help you navigate the dissertation process...").classes('q-pa-md')
 
     with ui.column().classes('w-full h-full no-wrap items-stretch'):
-        chat_area = ui.column().classes('w-full flex-grow overflow-y-auto q-pa-md').style('height: calc(100vh - 150px);')
+        chat_area = ui.column().classes('w-full flex-grow overflow-y-auto q-pa-md').style('height: calc(100vh - 200px);')
         
+        # Initial greeting
+        if not chat_state.chat_history.get(chat_state.current_chat_id):
+            with chat_area:
+                with ui.row().classes('w-full'):
+                    with ui.card().classes('max-w-[70%] bg-gray-100'):
+                        ui.label(app_callbacks.get_initial_greeting_text_cached()).classes('whitespace-pre-wrap')
+        
+        # Display existing messages
+        ui.timer(0.1, lambda: display_chat_messages(chat_area), once=True) # Display messages after UI is built
+
         @ui.refreshable
         def suggested_prompts_container_ui():
-            s_user = app.storage.user
-            suggested_prompts = s_user.get("suggested_prompts", [])
-            with ui.row().classes('w-full q-pa-sm justify-center'):
-                if suggested_prompts:
-                    for p_text in suggested_prompts:
-                        ui.button(p_text, on_click=lambda p=p_text: handle_suggested_prompt(p)).props('outline rounded dense color=primary').classes('q-ma-xs')
-                else:
-                    ui.label("No suggested prompts.").classes('text-italic text-grey-6')
-        
-        suggested_prompts_container_ui() # Initial call to create the refreshable content
+            current_chat_history = chat_state.chat_history.get(chat_state.current_chat_id, [])
+            # Convert list of dicts to tuple of tuples for caching
+            hashable_history = tuple(tuple(msg.items()) for msg in current_chat_history)
+            prompts = app_callbacks.generate_suggested_prompts_cached(hashable_history)
+            if prompts:
+                with ui.row().classes('w-full justify-center q-mb-md'):
+                    for prompt in prompts:
+                        ui.button(prompt, on_click=lambda p=prompt: handle_suggested_prompt(p)) \
+                            .props('outline rounded dense color=grey-7') \
+                            .classes('q-ma-xs')
+        suggested_prompts_container_ui()
 
-        with ui.row().classes('w-full items-center q-pa-md bg-grey-2'):
-            ui.input(placeholder="Ask me about dissertations...").props('rounded outlined dense input-class="ml-3"').classes('flex-grow').bind_value(chat_state, 'chat_input_value').on('keydown.enter', handle_send_message)
-            ui.button(icon='send', on_click=handle_send_message).props('round dense color=primary')
+        with ui.row().classes('w-full bg-white q-pa-md items-center'):
+            with ui.input(placeholder='Type your message here...').props('rounded outlined dense').classes('flex-grow') as chat_input_ui:
+                chat_input_ui.bind_value(chat_state, 'chat_input_value')
+                chat_input_ui.on('keydown.enter', handle_send_message)
+            ui.button(icon='send', on_click=handle_send_message).props('round flat').classes('ml-2')
 
     async def handle_rename_chat_dialog(chat_id: str, current_name: str, parent_menu: ui.menu):
-        parent_menu.close()
+        parent_menu.close() # Close the context menu
         with ui.dialog() as dialog, ui.card():
-            ui.label(f"Rename chat: '{current_name}'").classes('text-h6')
-            new_name_input = ui.input("New name", value=current_name)
+            ui.label("Rename Chat").classes("text-h6")
+            new_name_input = ui.input("New Name", value=current_name).props('outlined dense')
             with ui.row():
-                ui.button("Rename", on_click=lambda: (app_callbacks.rename_chat(chat_id, new_name_input.value) if app_callbacks.rename_chat and new_name_input.value else None, dialog.close()))
-                ui.button("Cancel", on_click=dialog.close)
-        await dialog
+                ui.button("Cancel", on_click=dialog.close).props('flat')
+                ui.button("Rename", on_click=lambda: (
+                    app_callbacks.rename_chat(chat_id, new_name_input.value),
+                    dialog.close(),
+                    chat_list_container_ui.refresh() # Refresh chat list after rename
+                ))
+        dialog.open()
 
     async def handle_delete_chat_confirm(chat_id: str, parent_menu: ui.menu):
-        parent_menu.close()
+        parent_menu.close() # Close the context menu
         with ui.dialog() as dialog, ui.card():
-            ui.label(f"Delete this chat?").classes('text-h6')
+            ui.label("Confirm Deletion").classes("text-h6")
+            ui.label(f"Are you sure you want to delete chat '{chat_state.chat_names.get(chat_id, chat_id)}'? This cannot be undone.").classes("q-mt-md")
             with ui.row():
-                ui.button("Delete", color='negative', on_click=lambda: (app_callbacks.delete_chat(chat_id) if app_callbacks.delete_chat else None, dialog.close()))
-                ui.button("Cancel", on_click=dialog.close)
-        await dialog
+                ui.button("Cancel", on_click=dialog.close).props('flat')
+                ui.button("Delete", on_click=lambda: (
+                    app_callbacks.delete_chat(chat_id),
+                    dialog.close(),
+                    chat_list_container_ui.refresh(), # Refresh chat list after delete
+                    display_chat_messages(chat_area), # Refresh chat area if current chat deleted
+                    suggested_prompts_container_ui.refresh() # Refresh suggested prompts
+                )).props('color=negative')
+        dialog.open()
 
     async def handle_download_md(chat_id: str, chat_name: str, parent_menu: ui.menu):
         parent_menu.close()
         if app_callbacks.get_discussion_markdown:
-            content = app_callbacks.get_discussion_markdown(chat_id)
-            ui.download(content.encode(), f"{chat_name.replace(' ', '_')}.md")
-        else: ui.notify("MD download not set up.", type='negative')
+            markdown_content = app_callbacks.get_discussion_markdown(chat_id)
+            # Use NiceGUI's download function
+            ui.download(
+                data=markdown_content.encode('utf-8'),
+                filename=f'{chat_name.replace(" ", "_")}_discussion.md',
+                mime_type='text/markdown'
+            )
+            ui.notify(f"Downloading '{chat_name}' as Markdown.", type='info')
+        else:
+            ui.notify("Markdown download handler not set.", type='negative')
 
     async def handle_download_docx(chat_id: str, chat_name: str, parent_menu: ui.menu):
         parent_menu.close()
         if app_callbacks.get_discussion_docx:
-            try:
-                content = app_callbacks.get_discussion_docx(chat_id)
-                ui.download(content, f"{chat_name.replace(' ', '_')}.docx")
-            except NotImplementedError:
-                ui.notify("DOCX export is not yet implemented.", type='warning')
-            except Exception as e:
-                ui.notify(f"Error downloading DOCX: {e}", type='negative')
-        else: ui.notify("DOCX download not set up.", type='negative')
-
-    return chat_area, suggested_prompts_container_ui, uploaded_files_list_ui, chat_list_container_ui
+            docx_bytes = app_callbacks.get_discussion_docx(chat_id)
+            if docx_bytes.startswith(b"Error:"): # Check for error message from the callback
+                ui.notify(docx_bytes.decode('utf-8'), type='negative')
+                return
+            ui.download(
+                data=docx_bytes,
+                filename=f'{chat_name.replace(" ", "_")}_discussion.docx',
+                mime_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+            )
+            ui.notify(f"Downloading '{chat_name}' as DOCX.", type='info')
+        else:
+            ui.notify("DOCX download handler not set.", type='negative')
 
 
 if __name__ == "__main__":
     # Define storage paths for ui.run in standalone test mode
     TEST_USER_STORAGE_DIR = os.path.join(PROJECT_ROOT, '.nicegui_test_storage', 'user')
-    TEST_GENERAL_STORAGE_FILE = os.path.join(PROJECT_ROOT, '.nicegui_test_storage', 'general.json')
-    os.makedirs(TEST_USER_STORAGE_DIR, exist_ok=True)
-    os.makedirs(os.path.dirname(TEST_GENERAL_STORAGE_FILE), exist_ok=True)
+    TEST_GENERAL_STORAGE_DIR = os.path.join(PROJECT_ROOT, '.nicegui_test_storage', 'general')
 
-    # Configure storage for the standalone test mode here, before ui.run()
-    app.storage.configure(
-        user_dir=TEST_USER_STORAGE_DIR,
-        general_file=TEST_GENERAL_STORAGE_FILE,
-        secret=STORAGE_SECRET,
-    )
+    # Ensure test storage directories exist
+    os.makedirs(TEST_USER_STORAGE_DIR, exist_ok=True)
+    os.makedirs(TEST_GENERAL_STORAGE_DIR, exist_ok=True)
+
+    # Configure NiceGUI to use test storage paths
+    app.storage.user.set_path(TEST_USER_STORAGE_DIR)
+    app.storage.general.set_path(TEST_GENERAL_STORAGE_DIR)
+    app.storage.user.set_storage_secret(STORAGE_SECRET) # Use the defined STORAGE_SECRET
 
     @ui.page('/')
     async def index_page(client: Client):
+        # Clear storage for a clean test run
         app.storage.user.clear()
-        app.storage.user.update({
-            "messages": {"test_id_1": [{"role": "assistant", "content": "ESI NiceGUI Standalone Test"}]},
-            "chat_metadata": {"test_id_1": "Test Chat Alpha", "test_id_2": "Beta Conversation"},
-            "current_chat_id": "test_id_1",
-            "uploaded_documents": {},
-            "uploaded_dataframes": {},
-            "llm_temperature": 0.6,
-            "llm_verbosity": 2,
-            "search_results_count": 4,
-            "long_term_memory_enabled": False,
-            "suggested_prompts": ["Hello ESI", "What can you do?"]
-        })
+        # Re-initialize chat_state for the test run
+        globals()['chat_state'] = ChatState()
+        await app.storage.user.clear() # Clear user storage for a clean test run
 
+        # Mock implementations for testing the UI in isolation
         async def mock_handle_input_app(text):
-            print(f"APP_MOCK: User input: {text}")
-            s_user = app.storage.user
-            current_chat_id = s_user["current_chat_id"]
-            s_user["messages"][current_chat_id].append({"role": "user", "content": text})
-            await app.loop.run_in_executor(None, time.sleep, 0.5)
-            s_user["messages"][current_chat_id].append({"role": "assistant", "content": f"NiceGUI echo: {text}"})
-            chat_area_ref = s_user.get('chat_area_ref')
-            if chat_area_ref: await display_chat_messages(chat_area_ref)
-            suggested_prompts_ref = s_user.get('suggested_prompts_container_ref')
-            if suggested_prompts_ref: await suggested_prompts_ref.refresh()
+            print(f"Mock handle_user_input: {text}")
+            # Simulate streaming response
+            response_chunks = [f"You said: '{text}'. ", "This is a mock response. ", "How can I assist further?"]
+            for chunk in response_chunks:
+                yield chunk
+                await asyncio.sleep(0.1) # Simulate delay
 
         async def mock_handle_upload_app(name, content, content_type):
-            print(f"APP_MOCK: File upload: {name}, type: {content_type}, size: {len(content)}")
-            s_user = app.storage.user
-            if content_type and ("text" in content_type or name.lower().endswith(('.txt', '.md'))):
-                s_user.setdefault("uploaded_documents", {})[name] = content # Store bytes
-            elif content_type and ("csv" in content_type or name.lower().endswith(('.csv', '.xlsx', '.sav'))):
-                s_user.setdefault("uploaded_dataframes", {})[name] = content # Store bytes
-            s_user["messages"][s_user["current_chat_id"]].append({"role": "assistant", "content": f"File '{name}' received by mock app."})
-            chat_area_ref = s_user.get('chat_area_ref')
-            if chat_area_ref: await display_chat_messages(chat_area_ref)
-            files_refresher = s_user.get('ui_uploaded_files_container_ref')
-            if files_refresher: await files_refresher.refresh()
+            print(f"Mock handle_file_upload: {name}, type: {content_type}, size: {len(content)} bytes")
+            file_type = "dataframe" if content_type and ('csv' in content_type or 'excel' in content_type) else "document"
+            if file_type not in chat_state.uploaded_files:
+                chat_state.uploaded_files[file_type] = {}
+            chat_state.uploaded_files[file_type][name] = {"content": content, "content_type": content_type}
+            ui.notify(f"Mock uploaded {name}", type='positive')
 
         async def mock_remove_file_app(ftype, fname):
-            print(f"APP_MOCK: Remove file: {ftype} - {fname}")
-            s_user = app.storage.user
-            if ftype == "document" and fname in s_user.get("uploaded_documents", {}):
-                del s_user["uploaded_documents"][fname]
-            elif ftype == "dataframe" and fname in s_user.get("uploaded_dataframes", {}):
-                del s_user["uploaded_dataframes"][fname]
-            files_refresher = s_user.get('ui_uploaded_files_container_ref')
-            if files_refresher: await files_refresher.refresh()
+            print(f"Mock remove_file: {ftype}/{fname}")
+            if ftype in chat_state.uploaded_files and fname in chat_state.uploaded_files[ftype]:
+                del chat_state.uploaded_files[ftype][fname]
+                ui.notify(f"Mock removed {fname}", type='info')
+            else:
+                ui.notify(f"Mock file {fname} not found", type='warning')
 
         async def mock_set_ltm(val: bool):
-            print(f"APP_MOCK: Set LTM to {val}")
-            s_user = app.storage.user
-            s_user['long_term_memory_enabled'] = val
-            if 'chat_list_container_ref' in s_user: await s_user['chat_list_container_ref'].refresh()
-            if 'chat_area_ref' in s_user: await s_user['chat_area_ref'].refresh()
-            if 'suggested_prompts_container_ref' in s_user: await s_user['suggested_prompts_container_ref'].refresh()
+            print(f"Mock set_long_term_memory: {val}")
+            chat_state.long_term_memory_enabled = val
+            ui.notify(f"Mock LTM set to {val}", type='info')
 
         async def mock_new_chat():
-            s_user = app.storage.user
-            new_id = str(uuid.uuid4())
-            s_user["chat_metadata"][new_id] = f"Mock Chat {len(s_user['chat_metadata']) + 1}"
-            s_user["messages"][new_id] = [{"role": "assistant", "content": "New mock chat started!"}]
-            s_user["current_chat_id"] = new_id
-            s_user["suggested_prompts"] = ["New mock prompt 1", "New mock prompt 2"]
-            if 'chat_list_container_ref' in s_user: await s_user['chat_list_container_ref'].refresh()
-            if 'chat_area_ref' in s_user: await display_chat_messages(s_user['chat_area_ref'])
-            if 'suggested_prompts_container_ref' in s_user: await s_user['suggested_prompts_container_ref'].refresh()
+            print("Mock new chat")
+            new_chat_id = str(uuid.uuid4())
+            chat_state.chat_history[new_chat_id] = []
+            chat_state.chat_names[new_chat_id] = f"Mock Chat {len(chat_state.chat_history)}"
+            chat_state.current_chat_id = new_chat_id
+            ui.notify("Mock new chat started!", type='positive')
 
         async def mock_delete_chat(chat_id: str):
-            s_user = app.storage.user
-            if chat_id in s_user["chat_metadata"]:
-                del s_user["chat_metadata"][chat_id]
-                del s_user["messages"][chat_id]
-                if s_user["current_chat_id"] == chat_id:
-                    if s_user["chat_metadata"]:
-                        s_user["current_chat_id"] = next(iter(s_user["chat_metadata"]))
-                    else:
-                        s_user["current_chat_id"] = None
-                if 'chat_list_container_ref' in s_user: await s_user['chat_list_container_ref'].refresh()
-                if 'chat_area_ref' in s_user: await display_chat_messages(s_user['chat_area_ref'])
-                if 'suggested_prompts_container_ref' in s_user: await s_user['suggested_prompts_container_ref'].refresh()
-
+            print(f"Mock delete chat: {chat_id}")
+            if chat_id in chat_state.chat_history:
+                del chat_state.chat_history[chat_id]
+                del chat_state.chat_names[chat_id]
+                if chat_state.current_chat_id == chat_id:
+                    chat_state.current_chat_id = None
+                ui.notify(f"Mock chat {chat_id} deleted.", type='info')
+            
         async def mock_rename_chat(chat_id: str, new_name: str):
-            s_user = app.storage.user
-            if chat_id in s_user["chat_metadata"]:
-                s_user["chat_metadata"][chat_id] = new_name
-                if 'chat_list_container_ref' in s_user: await s_user['chat_list_container_ref'].refresh()
+            print(f"Mock rename chat: {chat_id} to {new_name}")
+            if chat_id in chat_state.chat_names:
+                chat_state.chat_names[chat_id] = new_name
+                ui.notify(f"Mock chat renamed to {new_name}.", type='positive')
 
         async def mock_switch_chat(chat_id: str):
-            s_user = app.storage.user
-            s_user["current_chat_id"] = chat_id
-            s_user["suggested_prompts"] = [f"Prompt for {chat_id} 1", f"Prompt for {chat_id} 2"]
-            if 'chat_area_ref' in s_user: await display_chat_messages(s_user['chat_area_ref'])
-            if 'suggested_prompts_container_ref' in s_user: await s_user['suggested_prompts_container_ref'].refresh()
+            print(f"Mock switch chat: {chat_id}")
+            if chat_id in chat_state.chat_history:
+                chat_state.current_chat_id = chat_id
+                ui.notify(f"Mock switched to chat {chat_id}.", type='info')
 
         async def mock_regenerate():
-            s_user = app.storage.user
-            current_chat_id = s_user["current_chat_id"]
-            messages = s_user["messages"][current_chat_id]
-            if messages and messages[-1]["role"] == "user":
-                last_user_input = messages[-1]["content"]
-                messages.append({"role": "assistant", "content": f"Regenerated: {last_user_input}"})
-            elif messages and messages[-1]["role"] == "assistant" and len(messages) > 1 and messages[-2]["role"] == "user":
-                last_user_input = messages[-2]["content"]
-                messages[-1]["content"] = f"Regenerated: {last_user_input}"
-            if 'chat_area_ref' in s_user: await display_chat_messages(s_user['chat_area_ref'])
-            if 'suggested_prompts_container_ref' in s_user: await s_user['suggested_prompts_container_ref'].refresh()
+            print("Mock regenerate last response")
+            if chat_state.last_user_query:
+                ui.notify("Mock regenerating last response...", type='info')
+                # Simulate regeneration by re-sending the last query
+                # In a real scenario, you'd use chat_state.last_chat_history_before_regen
+                # and call the agent with it.
+                await mock_handle_input_app(chat_state.last_user_query)
+            else:
+                ui.notify("No last query to regenerate.", type='warning')
 
-        s_user = app.storage.user
-        chat_area_ref, suggested_prompts_ref, uploaded_files_ref, chat_list_ref = create_nicegui_interface(
+        def mock_get_discussion_markdown(chat_id: str) -> str:
+            print(f"Mock get markdown for {chat_id}")
+            return f"# Mock Markdown for {chat_state.chat_names.get(chat_id, chat_id)}\n\nMock content."
+
+        def mock_get_discussion_docx(chat_id: str) -> bytes:
+            print(f"Mock get docx for {chat_id}")
+            return b"Mock DOCX content."
+
+        def mock_get_initial_greeting_text_cached() -> str:
+            return "Hello from mock UI! How can I help you today?"
+
+        def mock_generate_suggested_prompts_cached(chat_history_tuple: tuple) -> List[str]:
+            if len(chat_history_tuple) < 2:
+                return ["Mock Prompt A", "Mock Prompt B"]
+            else:
+                return ["Mock Follow-up C", "Mock Follow-up D"]
+
+        # Initialize chat_state for the mock UI
+        await mock_new_chat() # Start with a new mock chat
+
+        create_nicegui_interface(
             ext_handle_user_input_callback=mock_handle_input_app,
-            ext_handle_file_upload_app_callback=mock_handle_upload_app,
-            ext_remove_file_app_callback=mock_remove_file_app,
-            ext_set_long_term_memory_callback=mock_set_ltm,
-            ext_reset_callback=mock_new_chat,
+            ext_reset_callback=mock_new_chat, # Use mock_new_chat for reset in test
             ext_new_chat_callback=mock_new_chat,
             ext_delete_chat_callback=mock_delete_chat,
             ext_rename_chat_callback=mock_rename_chat,
             ext_switch_chat_callback=mock_switch_chat,
-            ext_get_discussion_markdown_callback=lambda cid: f"## Markdown for {cid}\n- Point 1",
-            ext_get_discussion_docx_callback=lambda cid: b"DOCX_CONTENT_FOR_" + cid.encode(),
-            ext_forget_me_callback=lambda: print("Mock Forget Me"),
-            ext_regenerate_callback=mock_regenerate,
-            current_chat_id_val=s_user.get("current_chat_id"),
-            chat_metadata_val=s_user.get("chat_metadata", {}),
-            llm_temp_val=s_user.get("llm_temperature"),
-            llm_verb_val=s_user.get("llm_verbosity"),
-            search_count_val=s_user.get("search_results_count"),
-            ltm_enabled_val=s_user.get("long_term_memory_enabled"),
-            suggested_prompts_list_val=s_user.get("suggested_prompts")
+            ext_get_discussion_markdown_callback=mock_get_discussion_markdown,
+            ext_get_discussion_docx_callback=mock_get_discussion_docx,
+            ext_forget_me_callback=lambda: (app.storage.user.clear(), globals()['chat_state'].__init__(), mock_new_chat(), ui.notify("Mock data forgotten.", type='positive')),
+            ext_set_long_term_memory_callback=mock_set_ltm,
+            ext_regenerate_last_response_callback=mock_regenerate,
+            ext_handle_file_upload_callback=mock_handle_upload_app,
+            ext_remove_file_callback=mock_remove_file_app,
+            chat_state=chat_state, # Pass the mock chat_state
+            get_initial_greeting_text_cached=mock_get_initial_greeting_text_cached,
+            generate_suggested_prompts_cached=mock_generate_suggested_prompts_cached
         )
-        s_user['chat_area_ref'] = chat_area_ref
-        s_user['suggested_prompts_container_ref'] = suggested_prompts_ref
-        s_user['ui_uploaded_files_container_ref'] = uploaded_files_ref
-        s_user['chat_list_container_ref'] = chat_list_ref
 
-        await display_chat_messages(chat_area_ref)
-        await uploaded_files_ref.refresh()
-        await suggested_prompts_ref.refresh()
-        await chat_list_ref.refresh()
-
-    app.add_static_files('/workspace', UI_ACCESSIBLE_WORKSPACE)
-    mimetypes.add_type('application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.docx')
-    ui.run(
-        title="ESI NiceGUI Test",
-        storage_secret=STORAGE_SECRET,
-        host="0.0.0.0",
-        port=8080,
-    )
+    ui.run(storage_secret=STORAGE_SECRET)

@@ -38,6 +38,9 @@ HF_ADDITIONAL_SOURCE_DATA_UPLOAD_PATH = "source_data" # Target subfolder on Hugg
 WEBPAGES_FILE_RELATIVE = "ragdb/webpages.txt" # File containing URLs to scrape, one per line
 WEBPAGES_FILE = os.path.join(PROJECT_ROOT, WEBPAGES_FILE_RELATIVE)
 
+# --- Agent Configuration ---
+MAX_SEARCH_RESULTS = 5 # Default number of search results for tools
+
 # --- Other API Keys (if needed by other modules in your project) ---
 # These are included as common examples, ensure they are set as environment variables
 # or directly in your .env file.
