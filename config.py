@@ -1,5 +1,7 @@
 import os
+from dotenv import load_dotenv
 
+load_dotenv()  # Load environment variables from a .env file if it exists
 # Determine the project root dynamically, assuming config.py is at the project root
 PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 
@@ -40,5 +42,4 @@ WEBPAGES_FILE = os.path.join(PROJECT_ROOT, WEBPAGES_FILE_RELATIVE)
 # These are included as common examples, ensure they are set as environment variables
 # or directly in your .env file.
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", None)
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", None)
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", None) # For GoogleGenAIEmbedding

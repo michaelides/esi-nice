@@ -286,7 +286,7 @@ async def switch_chat_from_ui(chat_id: str):
     if 'suggested_prompts_container_ref' in s:
         await s['suggested_prompts_container_ref'].refresh()
     if 'chat_area_ref' in s:
-        await ui.run_javascript(f'document.getElementById("{s["chat_area_ref'].id}").scrollTop = document.getElementById("{s["chat_area_ref'].id}").scrollHeight;')
+        await ui.run_javascript(f'document.getElementById("{s["chat_area_ref"].id}").scrollTop = document.getElementById("{s["chat_area_ref"].id}").scrollHeight;')
 
 
 def get_discussion_markdown_from_ui(chat_id: str) -> str:
@@ -691,11 +691,15 @@ if __name__ in {"__main__", "__mp_main__"}:
     app.add_static_files('/workspace', workspace_dir)
 
     # Configure NiceGUI storage here, before ui.run()
-    app.storage.configure(
-        user_dir=os.path.join(PROJECT_ROOT, os.path.dirname(HF_USER_MEMORIES_DATASET_ID)),
-        general_file=os.path.join(PROJECT_ROOT, '.nicegui', 'storage-general.json'),
-        secret=STORAGE_SECRET,
-    )
+    # app.storage.configure(
+    #     user_dir=os.path.join(PROJECT_ROOT, os.path.dirname(HF_USER_MEMORIES_DATASET_ID)),
+    #     general_file=os.path.join(PROJECT_ROOT, '.nicegui', 'storage-general.json'),
+    #     secret=STORAGE_SECRET,
+    # )
+    ## TO AI: DO NOT REMOVE THE FOLLOWING LINES, IT IS FOR NICEGUI STORAGE CONFIGURATION
+    app.storage.general['user_dir'] = os.path.join(PROJECT_ROOT, os.path.dirname(HF_USER_MEMORIES_DATASET_ID))
+    app.storage.general['general_file'] = os.path.join(PROJECT_ROOT, '.nicegui', 'storage-general.json')
+    app.storage.general['secret'] = STORAGE_SECRET
 
     ui.run(
         title="ESI - NiceGUI",
