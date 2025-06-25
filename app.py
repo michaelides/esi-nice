@@ -618,6 +618,11 @@ async def main_page(client: Client):
     print(f"DEBUG: Start of main_page, type of client.shared: {type(client.shared)}")
     print(f"DEBUG: Value of client.shared: {client.shared}")
 
+    # Ensure client.shared is a dictionary before use
+    if not isinstance(client.shared, dict):
+        print(f"WARNING: client.shared was of type {type(client.shared)} with value '{client.shared}'. Resetting to an empty dict.")
+        client.shared = {}
+
     # Initialize user session storage and load data
     await initialize_user_session_storage(client)
 
